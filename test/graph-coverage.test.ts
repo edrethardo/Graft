@@ -134,9 +134,10 @@ test("unsupportedFileNote fires only for code-like extensions", () => {
   assert.equal(unsupportedFileNote("README.md"), null); // not code
 });
 
-test("callers on a definitions-only language says 'no edge data', not 'no callers'", () => {
+test("callers on an inferred-only language warns about undercount, not 'no callers'", () => {
   const note = looseNoteFor("in", "step", 1, { edgeless: true });
-  assert.ok(note.includes("definitions-only"), note);
+  assert.ok(note.includes("inferred"), note);
+  assert.ok(note.includes("may undercount"), note);
   assert.ok(note.includes("graft grep"), note);
   assert.ok(!note.includes("no indexed callers"), note);
 

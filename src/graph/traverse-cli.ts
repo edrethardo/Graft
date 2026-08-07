@@ -15,7 +15,7 @@ import { resolve } from "node:path";
 import { contextDirFor } from "../context/node-file.js";
 import { withSavings, savingsFor, type Savings } from "../context/savings.js";
 import { unindexedNote, type UnindexedStat } from "./coverage.js";
-import { hasEdgeExtraction, languageOf } from "./extract.js";
+import { edgeCoverageOf, languageOf } from "./extract.js";
 import { loadGraphCached } from "./load.js";
 import { resolveSymbol, edgeWalk, type Direction, type EdgeHit } from "./traverse.js";
 import type { GraphV1, NodeV1 } from "./types.js";
@@ -80,11 +80,11 @@ export function looseNoteFor(
   opts: { edgeless?: boolean } = {},
 ): string {
   const label = direction === "out" ? "callees" : "callers";
-  // A definitions-only language (C/C++) HAS no edge data — an empty result is
-  // "no data", never "nothing calls this", and must not read like a fact about
-  // the code (issue #66).
+  // C/C++ edges are inferred-only (unique names, this->, Class::method — see
+  // edgeCoverageOf): an empty result may be real undercount, and must not read
+  // like "nothing calls this" (issues #66/#68).
   if (opts.edgeless) {
-    return `  no edge data — this symbol is in a definitions-only language (C/C++): call edges are not extracted, so the graph cannot know its ${label}. Find its uses with graft grep "${name}" or raw grep -rn`;
+    return `  no ${label} in the graph — but C/C++ call edges are inferred (unique names, this->, and Class::method calls only) and may undercount. Verify with graft grep "${name}" or raw grep -rn before concluding nothing ${direction === "out" ? "is called" : "calls this"}`;
   }
   const dir = direction === "out" ? "outgoing" : "incoming";
   const ambiguity =
@@ -94,11 +94,12 @@ export function looseNoteFor(
   return `  no indexed ${label} — the graph has no ${dir} call/reference edges for this symbol as written.${ambiguity} Check the name (try the bare symbol, or "Type.method"), or find its uses with graft grep "${name}". Fall back to raw grep -rn only for unindexed files`;
 }
 
-/** True when a symbol's language is indexed definitions-only (no call edges) —
- * the case {@link looseNoteFor}'s `edgeless` note phrases honestly. */
+/** True when a symbol's language has inferred-only edge coverage (C/C++) —
+ * the case {@link looseNoteFor}'s `edgeless` note phrases as possible
+ * undercount rather than as a fact about the code. */
 export function symbolEdgeless(node: NodeV1): boolean {
   const lang = languageOf(node.path);
-  return lang !== null && !hasEdgeExtraction(lang);
+  return lang !== null && edgeCoverageOf(lang) !== "full";
 }
 
 /** The unknown-symbol error for `graft callers` and `graft_trace_calls` — one

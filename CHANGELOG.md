@@ -16,6 +16,16 @@
   C/C++ symbol says "no edge data … definitions-only" instead of answering
   wrongly, and points at `graft grep` ([#66]).
 
+- **Inferred call edges for C/C++** — call sites now feed the same conservative
+  resolver every language uses: a same-file or repo-unique bare name resolves
+  (`extracted` / `inferred`), `this->method()` and qualified
+  `Class::method(...)` calls resolve through the owner-qualified method index
+  (including inside out-of-class definition bodies), `base_class_clause`
+  produces `extends` edges, and everything else — ambiguous names, untracked
+  receivers — is dropped rather than guessed. `graft callers` works on C/C++
+  symbols, and its zero-hit note says the coverage is inferred and may
+  undercount instead of "no edge data" ([#68]).
+
 ### Fixed
 
 - **Unsupported languages fail loudly instead of masquerading as answers.**
@@ -31,6 +41,7 @@
   languages actually indexed ([#66]).
 
 [#66]: https://github.com/NanoNets/Graft/issues/66
+[#68]: https://github.com/NanoNets/Graft/issues/68
 
 ## 0.9.0
 
