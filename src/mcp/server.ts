@@ -3,6 +3,9 @@
  * stdout carries protocol messages ONLY; diagnostics go to stderr.
  */
 import { createInterface } from 'node:readline';
+import { resolve } from 'node:path';
+import { contextDirFor } from '../context/node-file.js';
+import { loadGraphCached } from '../graph/load.js';
 import { TOOLS, callTool } from './tools.js';
 import { mcpInstructions } from './instructions.js';
 import { runUpkeep } from '../upkeep-run.js';
@@ -55,7 +58,19 @@ export function startMcpServer(root: string, dirOverride?: string, version = '0'
           capabilities: { tools: {} },
           serverInfo: { name: 'graft', version },
           // The one channel that survives tool deferral — see ./instructions.ts.
-          instructions: upkeep.length ? `${upkeep.join('\n')}\n\n${mcpInstructions()}` : mcpInstructions(),
+          // Upkeep notices ride along; the graph's coverage gap (meta.unindexed)
+          // scopes the "prefer these tools" claim so an agent on a repo with
+          // unparsed files is not told to trust the graph for them. Null graph
+          // (not built yet) sends the plain version.
+          instructions: (() => {
+            const base = mcpInstructions(
+              loadGraphCached(contextDirFor(resolve(root), dirOverride))?.meta.unindexed,
+            );
+            return upkeep.length ? `${upkeep.join('
+')}
+
+${base}` : base;
+          })(),
         });
         return;
       case 'notifications/initialized':
