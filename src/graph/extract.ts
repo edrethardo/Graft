@@ -21,16 +21,20 @@ export type Language = "typescript" | "tsx" | "python" | "go" | "java";
 export type Language = "typescript" | "tsx" | "python" | "go" | "cpp";
 
 /**
- * C/C++ is a definitions-only tier: nodes and `contains` edges, but no
- * call/reference/import edges. Every other language resolves cross-file edges
- * through import bindings; C++ has none (only #include, namespaces, overloads,
- * templates), so name-only resolution would fabricate an edge between every
- * same-named method in the repo (issue #66). Consumers use this to say
- * honestly that edge data does not exist for a file, rather than answering
- * "nothing calls this" from a graph that never could have known.
+ * How much edge data a language's extraction can honestly claim (issue #66/#68).
+ *
+ * Every other language resolves cross-file edges through import bindings; C++
+ * has none (only #include, namespaces, overloads, templates), so its call
+ * edges ride the conservative resolver alone: same-file or unique-name
+ * matches, `this->`, and qualified `Class::method(...)` calls — everything
+ * else is dropped rather than guessed (see resolve.ts). That yields real but
+ * incomplete coverage, so C/C++ is "inferred-only": consumers phrase an empty
+ * result as possible undercount, never as "nothing calls this".
  */
-export function hasEdgeExtraction(lang: Language): boolean {
-  return lang !== "cpp";
+export type EdgeCoverage = "full" | "inferred-only";
+
+export function edgeCoverageOf(lang: Language): EdgeCoverage {
+  return lang === "cpp" ? "inferred-only" : "full";
 }
 
 /**
@@ -400,9 +404,11 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     // structural containment
     edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
     // class heritage — in Java an interface may also `extends`, and a record/enum
-    // may `implements`, so every type declaration is a heritage site, not just a class.
+    // may `implements`, so every type declaration is a heritage site, not just a
+    // class; in C++ a struct inherits too (it is a default-public class).
     const javaTypeDecl = ctx.lang === "java" && JAVA_TYPE_KINDS.has(desc.kind);
-    if (desc.kind === "class" || javaTypeDecl) edges.push(...heritageEdges(node, id, ctx));
+    if (desc.kind === "class" || javaTypeDecl || (ctx.lang === "cpp" && desc.kind === "struct"))
+      edges.push(...heritageEdges(node, id, ctx));
 
     const enclosingClass =
       desc.kind === "class" || javaTypeDecl
@@ -412,9 +418,16 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
           : ctx.enclosingClass;
     // structs count: a C++ struct is a class with default-public members, and its
     // inline methods need an owner just like a class's. (Go structs never contain
-    // definitions, so including "struct" here is a no-op for them.)
+    // definitions, so including "struct" here is a no-op for them.) `desc.owner`
+    // (only ever set for C++ out-of-class definitions) makes `this->x()` inside
+    // `void Physics::step() { ... }` resolve against Physics — the receiver class
+    // is named in the declarator, not in any enclosing node.
     const enclosingClass =
-      desc.kind === "class" || desc.kind === "struct" ? desc.name : isGoMethod ? goReceiverType(node) : ctx.enclosingClass;
+      desc.kind === "class" || desc.kind === "struct"
+        ? desc.name
+        : isGoMethod
+          ? goReceiverType(node)
+          : (desc.owner ?? ctx.enclosingClass);
     const childCtx: WalkCtx = {
       ...ctx,
       scope: [...ctx.scope, idPart],
@@ -428,15 +441,6 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
           : ctx.importedSymbols,
     };
     for (const child of node.namedChildren) walk(child, childCtx, out, edges, minted);
-    return;
-  }
-
-  // Definitions-only language (C/C++): descend for nested definitions but emit no
-  // call/reference/import edges — see hasEdgeExtraction() for why guessing is worse
-  // than abstaining. Without this gate the C++ grammar's `call_expression` nodes
-  // would fall straight into the capture below.
-  if (!hasEdgeExtraction(ctx.lang)) {
-    for (const child of node.namedChildren) walk(child, ctx, out, edges, minted);
     return;
   }
 
@@ -455,7 +459,9 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       // Java only: the call site's argument count, to pick the right overload.
       const argCount = ctx.lang === "java" ? javaArgCount(node) : undefined;
       if (argCount !== undefined) callEdge.argCount = argCount;
-      const recvType = resolveRecvType(callee.receiver, ctx);
+      // A qualified C++ call (`Physics::step(...)`) names its receiver TYPE in
+      // the callee itself — no bindings lookup can or should improve on it.
+      const recvType = callee.recvType ?? resolveRecvType(callee.receiver, ctx);
       edges.push(recvType ? { ...callEdge, recvType } : callEdge);
     }
   } else if (isImport(node, ctx.lang)) {
@@ -815,6 +821,17 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
     }
     return edges;
   }
+  if (ctx.lang === "cpp") {
+    // `class RigidBody : public Body { ... }` — base_class_clause children are
+    // the base type names (access specifiers are unnamed siblings).
+    const clause = node.namedChildren.find((c) => c.type === "base_class_clause");
+    for (const t of clause?.namedChildren ?? []) {
+      if (t.type === "type_identifier") {
+        edges.push({ source: classId, relation: "extends", name: t.text, file: ctx.rel });
+      }
+    }
+    return edges;
+  }
   if (ctx.lang === "python") {
     const supers = node.childForFieldName("superclasses"); // argument_list
     for (const c of supers?.namedChildren ?? []) {
@@ -857,7 +874,7 @@ function typeIdentifiersIn(node: Parser.SyntaxNode): string[] {
 function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
-): { name: string; viaMember: boolean; receiver?: string } | null {
+): { name: string; viaMember: boolean; receiver?: string; recvType?: string } | null {
   // Java first: `method_invocation` has NO `function` field (it splits the callee
   // into `object` + `name`), so the shared lookup below would return null for every
   // Java call site and the language would extract nodes with no call edges at all.
@@ -883,6 +900,30 @@ function calleeName(
   const fn = node.childForFieldName("function");
   if (!fn) return null;
   if (fn.type === "identifier") return { name: fn.text, viaMember: false };
+  if (lang === "cpp") {
+    // `obj.method()` / `ptr->tick()` / `this->applyGravity()` — the receiver
+    // TEXT only; resolveRecvType maps `this` to the enclosing class and drops
+    // everything else (no bindings for C++), so untracked receivers are
+    // captured-then-dropped, never guessed.
+    if (fn.type === "field_expression") {
+      const field = fn.childForFieldName("field");
+      const arg = fn.childForFieldName("argument");
+      const receiver = arg?.type === "this" ? "this" : arg?.type === "identifier" ? arg.text : undefined;
+      return field ? { name: field.text, viaMember: true, receiver } : null;
+    }
+    // `Physics::step(...)` — the qualifier IS the receiver type; innermost scope
+    // wins on a nested chain (`game::Physics::step` → Physics).
+    if (fn.type === "qualified_identifier") {
+      let recvType: string | undefined;
+      let n: Parser.SyntaxNode | null = fn;
+      while (n?.type === "qualified_identifier") {
+        recvType = n.childForFieldName("scope")?.text ?? recvType;
+        n = n.childForFieldName("name");
+      }
+      return n && recvType ? { name: n.text, viaMember: true, recvType } : null;
+    }
+    return null;
+  }
   if (lang === "python" && fn.type === "attribute") {
     const a = fn.childForFieldName("attribute") ?? fn.namedChildren.at(-1);
     return a ? { name: a.text, viaMember: true, receiver: pyReceiver(fn) } : null;

@@ -1,11 +1,11 @@
 /**
  * Tests for C/C++ extraction in the Tier-1 code graph (issue #66).
  *
- * C/C++ is a *definitions-only* tier: nodes for functions, methods, classes,
- * structs and enums — but NO call/reference/import edges. C++ has no import
- * bindings (only #include, namespaces, overloads, templates), so name-only
- * call resolution would fabricate edges between every same-named method in the
- * repo. `contains` edges are structural facts and are still emitted.
+ * Nodes for functions, methods, classes, structs and enums. C++ has no import
+ * bindings (only #include, namespaces, overloads, templates), so there are no
+ * import/reference edges, and call edges exist only where the conservative
+ * resolver can commit (issue #68, pinned in graph-cpp-edges.test.ts) —
+ * everything else is dropped rather than guessed.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -141,11 +141,20 @@ test("C/C++ extraction: functions, methods, classes, structs, enums", async () =
   assert.equal(nodeById(graph!, "util.c#clamp")?.kind, "function");
   assert.equal(nodeById(graph!, "util.c#make_buffer")?.kind, "function");
 
-  // definitions-only: `tick` calls `snapEntityToFloor` in the same file, and no
-  // calls/references/imports edge may exist — only structural containment.
+  // No import/reference edges ever (C++ has no import bindings to resolve
+  // through); calls exist only where the resolver can commit — here, exactly
+  // the same-file `tick` → `snapEntityToFloor` call (issue #68).
   assert.ok(nodeById(graph!, "physics.cpp#tick"), "tick should be indexed");
-  const nonContains = graph!.edges.filter((e) => e.relation !== "contains");
-  assert.deepEqual(nonContains, [], "C/C++ must emit no call/reference/import edges");
+  assert.ok(
+    !graph!.edges.some((e) => e.relation === "imports" || e.relation === "references"),
+    "C/C++ must emit no import/reference edges",
+  );
+  const calls = graph!.edges.filter((e) => e.relation === "calls");
+  assert.deepEqual(
+    calls,
+    [{ source: "physics.cpp#tick", target: "physics.cpp#snapEntityToFloor", relation: "calls", confidence: "extracted" }],
+    "only the resolvable same-file call may produce an edge",
+  );
   assert.ok(
     graph!.edges.some((e) => e.source === "engine.h#Entity" && e.target === "engine.h#Entity.health"),
     "containment edges are still emitted",
