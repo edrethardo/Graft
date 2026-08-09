@@ -14,7 +14,7 @@ import Java from "tree-sitter-java";
 import Cpp from "tree-sitter-cpp";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
-import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
+import { collectBindings, cppDeclaratorName, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
 export type Language = "typescript" | "tsx" | "python" | "go" | "java";
@@ -264,6 +264,7 @@ export interface WalkCtx {
   enclosingClass: string | null; // nearest enclosing class (py/ts `self`/`this`)
   goReceiverVar: string | null; // Go receiver var, e.g. `w` in `func (w *Worker)`
   importedSymbols: ReadonlyMap<string, { name: string; specifier: string }>;
+  cppNamespace: string[]; // C++ only: enclosing namespace path, [] elsewhere
 }
 
 /** A definition we're about to emit, normalized across the shapes we handle. */
@@ -328,6 +329,7 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
     enclosingClass: null,
     goReceiverVar: null,
     importedSymbols,
+    cppNamespace: [],
   };
   // Every id minted this file, seeded with the file node's own id (`rel`) so a
   // top-level definition can never collide with it. Threaded as its own
@@ -400,6 +402,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       ...(owner !== undefined ? { owner } : {}),
       ...(desc.arity !== undefined ? { arity: desc.arity } : {}),
       ...(desc.variadic ? { variadic: true } : {}),
+      ...(ctx.cppNamespace.length > 0 ? { ns: ctx.cppNamespace.join(".") } : {}),
     });
     // structural containment
     edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
@@ -441,6 +444,15 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
           : ctx.importedSymbols,
     };
     for (const child of node.namedChildren) walk(child, childCtx, out, edges, minted);
+    return;
+  }
+
+  // C++ namespaces don't emit nodes (members keep bare names — see issue #66),
+  // but membership is tracked so nodes can carry their `ns` path.
+  if (ctx.lang === "cpp" && node.type === "namespace_definition") {
+    const nsName = node.childForFieldName("name")?.text;
+    const nsCtx = nsName ? { ...ctx, cppNamespace: [...ctx.cppNamespace, nsName] } : ctx;
+    for (const child of node.namedChildren) walk(child, nsCtx, out, edges, minted);
     return;
   }
 
@@ -761,28 +773,6 @@ function describeCpp(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | nul
   return null;
 }
 
-/** The defined name inside a C/C++ declarator, unwrapping pointer/reference
- * wrappers (`int* make_buffer()`) and the function_declarator itself, then
- * resolving qualified names (`game::Entity::~Entity` → name `~Entity`,
- * qualifier `Entity` — the innermost scope is the owner). Handles plain
- * identifiers, class-body `field_identifier`s, `destructor_name` and
- * `operator_name`. Null when no name can be read (e.g. an abstract declarator). */
-function cppDeclaratorName(decl: Parser.SyntaxNode | null): { name: string; qualifier?: string } | null {
-  let d = decl;
-  while (d && (d.type === "pointer_declarator" || d.type === "reference_declarator" || d.type === "parenthesized_declarator")) {
-    d = d.childForFieldName("declarator") ?? d.namedChildren.at(-1) ?? null;
-  }
-  if (d?.type === "function_declarator") d = d.childForFieldName("declarator");
-  let qualifier: string | undefined;
-  while (d?.type === "qualified_identifier") {
-    qualifier = d.childForFieldName("scope")?.text ?? qualifier;
-    d = d.childForFieldName("name");
-  }
-  const NAME_TYPES = new Set(["identifier", "field_identifier", "destructor_name", "operator_name", "type_identifier"]);
-  if (!d || !NAME_TYPES.has(d.type)) return null;
-  return qualifier ? { name: d.text, qualifier } : { name: d.text };
-}
-
 /** The receiver's base type name for a Go method, unwrapping a pointer receiver
  * (`func (u *User) …` → `User`). Null if it can't be read. */
 function goReceiverType(node: Parser.SyntaxNode): string | null {
@@ -997,6 +987,7 @@ function isImport(node: Parser.SyntaxNode, lang: Language): boolean {
   // (`import ( … )`) forms each yield one edge as the walk recurses into the list.
   if (lang === "go") return node.type === "import_spec";
   if (lang === "java") return node.type === "import_declaration";
+  if (lang === "cpp") return node.type === "preproc_include";
   return node.type === "import_statement" || node.type === "import_from_statement";
 }
 
@@ -1020,6 +1011,12 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
       (c) => c.type === "scoped_identifier" || c.type === "identifier",
     );
     return id?.text ?? null;
+  if (lang === "cpp") {
+    // Quoted includes only — `<...>` names a system header by convention, which
+    // can never be a repo file, and dangling edges to <cstdio> would be noise.
+    const path = node.childForFieldName("path");
+    if (path?.type !== "string_literal") return null;
+    return path.text.replace(/^"|"$/g, "");
   }
   const str = node.namedChildren.find((c) => c.type === "string");
   if (!str) return null;

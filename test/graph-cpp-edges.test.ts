@@ -59,8 +59,7 @@ const ENGINE_CPP = `float Physics::step(float dt) { return dt; }
 
 void frame(float dt) {
   Physics::step(dt);
-  Body body;
-  body.integrate(dt);
+  gWorld.integrate(dt);
 }
 `;
 
@@ -114,7 +113,8 @@ test("C/C++ call edges: unique-name and receiver-typed resolution, ambiguity dro
   const step = edge(graph!, "engine.cpp#frame", "engine.cpp#Physics.step");
   assert.equal(step?.confidence, "extracted", "qualified call should resolve via ownerMethod");
 
-  // obj.method() with an untracked receiver → dropped, not guessed
+  // obj.method() with an UNDECLARED receiver (`gWorld` has no binding in this
+  // file — declared receivers resolve via graph-cpp-bindings.test.ts) → dropped
   assert.ok(
     !edge(graph!, "engine.cpp#frame", "physics.cpp#Body.integrate"),
     "member call with unknown receiver type must be dropped",

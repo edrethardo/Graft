@@ -34,6 +34,30 @@ export class FileBindings {
 
 const FN_VALUE_TYPES = new Set(["arrow_function", "function", "function_expression", "generator_function"]);
 
+/** The defined name inside a C/C++ declarator, unwrapping pointer/reference
+ * wrappers (`int* make_buffer()`) and the function_declarator itself, then
+ * resolving qualified names (`game::Entity::~Entity` → name `~Entity`,
+ * qualifier `Entity` — the innermost scope is the owner). Handles plain
+ * identifiers, class-body `field_identifier`s, `destructor_name` and
+ * `operator_name`. Null when no name can be read (e.g. an abstract declarator).
+ * Lives here (not extract.ts) because both files need it and extract.ts
+ * already imports values from this module — the reverse would be a cycle. */
+export function cppDeclaratorName(decl: Parser.SyntaxNode | null): { name: string; qualifier?: string } | null {
+  let d = decl;
+  while (d && (d.type === "pointer_declarator" || d.type === "reference_declarator" || d.type === "parenthesized_declarator")) {
+    d = d.childForFieldName("declarator") ?? d.namedChildren.at(-1) ?? null;
+  }
+  if (d?.type === "function_declarator") d = d.childForFieldName("declarator");
+  let qualifier: string | undefined;
+  while (d?.type === "qualified_identifier") {
+    qualifier = d.childForFieldName("scope")?.text ?? qualifier;
+    d = d.childForFieldName("name");
+  }
+  const NAME_TYPES = new Set(["identifier", "field_identifier", "destructor_name", "operator_name", "type_identifier"]);
+  if (!d || !NAME_TYPES.has(d.type)) return null;
+  return qualifier ? { name: d.text, qualifier } : { name: d.text };
+}
+
 /** Definition-node types that push a new scope segment, mirroring extract.ts's
  * `describe()` closely enough to keep the two scope stacks in lockstep — but
  * duplicated here (not imported) to keep bindings.ts free of a value import on
@@ -54,6 +78,20 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
       return recv ? `${recv}.${name}` : name;
     }
     if (node.type === "function_declaration" || node.type === "type_spec") {
+      return node.childForFieldName("name")?.text ?? null;
+    }
+    return null;
+  }
+  if (lang === "cpp") {
+    // Mirror extract.ts's describeCpp scope segments: an out-of-class method
+    // pushes `Owner.name` (its idName), a named body-bearing specifier its name.
+    if (node.type === "function_definition") {
+      const named = cppDeclaratorName(node.childForFieldName("declarator"));
+      if (!named) return null;
+      return named.qualifier ? `${named.qualifier}.${named.name}` : named.name;
+    }
+    if (node.type === "class_specifier" || node.type === "struct_specifier" || node.type === "enum_specifier") {
+      if (!node.childForFieldName("body")) return null; // forward declaration
       return node.childForFieldName("name")?.text ?? null;
     }
     return null;
@@ -99,6 +137,75 @@ function goReceiverTypeOf(node: Parser.SyntaxNode): string | null {
   return type?.type === "type_identifier" ? type.text : null;
 }
 
+/** C++ receiver types come straight from declared syntax — no inference:
+ * locals (`Body body;`, `Entity* target = e;`), parameters (`Entity* e`,
+ * `const Body& b`), and class fields (`Body body;` in a class body, stored
+ * under the class scope so both inline and same-file out-of-class methods can
+ * see them — see resolveRecvType's cpp probe). `auto` binds nothing, and a
+ * field_declaration whose declarator is a function_declarator is a method
+ * PROTOTYPE, not a variable — cppBindingName refuses it. */
+function handleCpp(
+  node: Parser.SyntaxNode,
+  scope: string[],
+  classScope: string | null,
+  bindings: FileBindings,
+): void {
+  const isField = node.type === "field_declaration";
+  if (node.type !== "declaration" && node.type !== "parameter_declaration" && !isField) return;
+  const typeNode = node.childForFieldName("type");
+  const type = cppTypeName(typeNode);
+  if (!type) return;
+  const scopeKey = isField ? (classScope ?? scope.join(".")) : scope.join(".");
+  for (const child of node.namedChildren) {
+    if (child === typeNode) continue;
+    const name = cppBindingName(child);
+    if (name) bindings.set(scopeKey, name, type);
+  }
+}
+
+/** The bare type name of a C++ declaration's type node: plain, templated
+ * (`Registry<int>` → Registry), or namespace-qualified (`game::Entity` →
+ * Entity). Primitives and `auto` yield null — nothing member-resolvable. */
+function cppTypeName(t: Parser.SyntaxNode | null): string | null {
+  if (!t) return null;
+  if (t.type === "type_identifier") return t.text;
+  if (t.type === "template_type") {
+    const name = t.childForFieldName("name") ?? t.namedChildren.find((c) => c.type === "type_identifier");
+    return name?.text ?? null;
+  }
+  if (t.type === "qualified_identifier") {
+    let n: Parser.SyntaxNode | null = t;
+    while (n?.type === "qualified_identifier") n = n.childForFieldName("name");
+    return n?.type === "type_identifier" ? n.text : null;
+  }
+  return null;
+}
+
+/** The variable a C++ declarator binds, unwrapping pointer/reference/array
+ * wrappers and init_declarators. A function_declarator means a prototype or
+ * function — not a variable — so it refuses rather than descends. */
+function cppBindingName(d: Parser.SyntaxNode | null): string | null {
+  let n = d;
+  while (n) {
+    if (n.type === "identifier" || n.type === "field_identifier") return n.text;
+    if (n.type === "init_declarator") {
+      n = n.childForFieldName("declarator");
+      continue;
+    }
+    if (
+      n.type === "pointer_declarator" ||
+      n.type === "reference_declarator" ||
+      n.type === "parenthesized_declarator" ||
+      n.type === "array_declarator"
+    ) {
+      n = n.childForFieldName("declarator") ?? n.namedChildren.at(-1) ?? null;
+      continue;
+    }
+    return null; // function_declarator (a prototype), abstract declarators, …
+  }
+  return null;
+}
+
 /** Resolves a call site's receiver text (from `calleeName`) to a bound type
  * name, given the enclosing walk state. `self`/`cls`/`this`/the Go receiver
  * var resolve directly to the enclosing class; anything else is a bindings-map
@@ -119,7 +226,12 @@ export function resolveRecvType(
   return (
     (ctx.lang === "go" && receiver === ctx.goReceiverVar ? ctx.enclosingClass : undefined) ??
     ctx.bindings.lookup(ctx.scope, receiver) ??
-    undefined
+    // C++ out-of-class definition bodies (`void Physics::step() { … }`) walk
+    // with scope ["Physics.step"], not ["Physics", "step"], so a same-file
+    // field binding stored under the class scope needs this second probe.
+    (ctx.lang === "cpp" && ctx.enclosingClass
+      ? (ctx.bindings.lookup([ctx.enclosingClass], receiver) ?? undefined)
+      : undefined)
   );
 }
 
@@ -129,6 +241,7 @@ function isClassNode(node: Parser.SyntaxNode, lang: Language): boolean {
   if (lang === "typescript" || lang === "tsx") {
     return node.type === "class_declaration" || node.type === "abstract_class_declaration";
   }
+  if (lang === "cpp") return node.type === "class_specifier" || node.type === "struct_specifier";
   return false;
 }
 
@@ -194,6 +307,7 @@ function visit(
   if (lang === "python") handlePy(node, scope, classScope, bindings, aliases);
   else if (lang === "go") handleGo(node, scope, bindings);
   else if (lang === "java") handleJava(node, scope, classScope, bindings);
+  else if (lang === "cpp") handleCpp(node, scope, classScope, bindings);
   else handleTs(node, scope, classScope, bindings, aliases);
 
   const name = defName(node, lang);

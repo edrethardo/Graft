@@ -141,13 +141,18 @@ test("C/C++ extraction: functions, methods, classes, structs, enums", async () =
   assert.equal(nodeById(graph!, "util.c#clamp")?.kind, "function");
   assert.equal(nodeById(graph!, "util.c#make_buffer")?.kind, "function");
 
-  // No import/reference edges ever (C++ has no import bindings to resolve
-  // through); calls exist only where the resolver can commit — here, exactly
-  // the same-file `tick` → `snapEntityToFloor` call (issue #68).
+  // No reference edges ever (C++ has no import bindings); imports edges are
+  // exactly the quoted includes; calls exist only where the resolver can
+  // commit — here, the same-file `tick` → `snapEntityToFloor` call (issue #68).
   assert.ok(nodeById(graph!, "physics.cpp#tick"), "tick should be indexed");
   assert.ok(
-    !graph!.edges.some((e) => e.relation === "imports" || e.relation === "references"),
-    "C/C++ must emit no import/reference edges",
+    !graph!.edges.some((e) => e.relation === "references"),
+    "C/C++ must emit no reference edges",
+  );
+  assert.deepEqual(
+    graph!.edges.filter((e) => e.relation === "imports"),
+    [{ source: "physics.cpp", target: "engine.h", relation: "imports", confidence: "extracted" }],
+    "quoted includes are imports edges",
   );
   const calls = graph!.edges.filter((e) => e.relation === "calls");
   assert.deepEqual(
