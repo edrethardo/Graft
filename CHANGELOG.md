@@ -26,6 +26,17 @@
   symbols, and its zero-hit note says the coverage is inferred and may
   undercount instead of "no edge data" ([#68]).
 
+- **Shell (`.sh`, `.bash`) in the Tier-1 symbol graph** — functions (both
+  `foo() {}` and `function foo {}` syntaxes) parse with `tree-sitter-bash`
+  under a `shell` label, so `skeleton`/`grep`/`ask` cover shell scripts. Calls
+  are `command` names resolved through the same conservative resolver
+  (same-file → extracted, repo-unique → inferred, ambiguous dropped) — an
+  external binary or builtin never resolves, so it never dangles. `source` is
+  deliberately not an import edge: its path is routinely variable-interpolated,
+  and a partial capture would read as a complete one. Shell shares C/C++'s
+  inferred-only edge coverage, so empty `callers` results phrase themselves as
+  possible undercount.
+
 ### Fixed
 
 - **Unsupported languages fail loudly instead of masquerading as answers.**

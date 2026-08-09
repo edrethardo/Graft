@@ -80,11 +80,12 @@ export function looseNoteFor(
   opts: { edgeless?: boolean } = {},
 ): string {
   const label = direction === "out" ? "callees" : "callers";
-  // C/C++ edges are inferred-only (unique names, this->, Class::method — see
-  // edgeCoverageOf): an empty result may be real undercount, and must not read
-  // like "nothing calls this" (issues #66/#68).
+  // Inferred-only languages (C/C++, shell — see edgeCoverageOf): call edges
+  // come from conservative name matching without import bindings, so an empty
+  // result may be real undercount, and must not read like "nothing calls
+  // this" (issues #66/#68).
   if (opts.edgeless) {
-    return `  no ${label} in the graph — but C/C++ call edges are inferred (unique names, this->, and Class::method calls only) and may undercount. Verify with graft grep "${name}" or raw grep -rn before concluding nothing ${direction === "out" ? "is called" : "calls this"}`;
+    return `  no ${label} in the graph — but this file's language has inferred-only call edges (conservative name matching) that may undercount. Verify with graft grep "${name}" or raw grep -rn before concluding nothing ${direction === "out" ? "is called" : "calls this"}`;
   }
   const dir = direction === "out" ? "outgoing" : "incoming";
   const ambiguity =
