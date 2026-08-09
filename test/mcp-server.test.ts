@@ -77,7 +77,8 @@ test('initialize carries instructions — the layer that survives tool deferral'
   // Observed sibling servers sit at 660–984 chars; nothing proves a longer one
   // survives un-truncated, so hold the line here rather than discover it later.
   assert.ok(instructions.length < 1000, `instructions must stay under 1000 chars, got ${instructions.length}`);
-  assert.match(serverInfo.version, /^\d+\.\d+\.\d+$/, 'real version, not the old hardcoded 0');
+  // Prerelease suffixes are legal semver — the fork ships as e.g. 0.9.1-fork.1.
+  assert.match(serverInfo.version, /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/, 'real version, not the old hardcoded 0');
 });
 
 test('unknown method returns -32601', async () => {
