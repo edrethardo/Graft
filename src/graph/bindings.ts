@@ -93,6 +93,14 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     if (JAVA_DEFS.has(node.type)) return node.childForFieldName("name")?.text ?? null;
     return null;
   }
+  if (lang === "swift") {
+    if (node.type === "function_declaration" || node.type === "class_declaration" || node.type === "protocol_declaration") {
+      return node.childForFieldName("name")?.text ?? null;
+    }
+    if (node.type === "init_declaration") return "init";
+    if (node.type === "deinit_declaration") return "deinit";
+    return null;
+  }
   if (lang === "cpp") {
     // Mirror extract.ts's describeCpp scope segments: an out-of-class method
     // pushes `Owner.name` (its idName), a named body-bearing specifier its name.
@@ -300,6 +308,7 @@ function isClassNode(node: Parser.SyntaxNode, lang: Language): boolean {
   }
   if (lang === "cpp") return node.type === "class_specifier" || node.type === "struct_specifier";
   if (lang === "java") return node.type === "class_declaration" || node.type === "record_declaration";
+  if (lang === "swift") return node.type === "class_declaration";
   return false;
 }
 

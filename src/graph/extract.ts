@@ -13,12 +13,13 @@ import Go from "tree-sitter-go";
 import Cpp from "tree-sitter-cpp";
 import Bash from "tree-sitter-bash";
 import Java from "tree-sitter-java";
+import Swift from "tree-sitter-swift";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, cppDeclaratorName, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "bash" | "java";
+export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "bash" | "java" | "swift";
 
 /**
  * How much edge data a language's extraction can honestly claim (issue #66/#68).
@@ -34,7 +35,7 @@ export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "bash" |
 export type EdgeCoverage = "full" | "inferred-only";
 
 export function edgeCoverageOf(lang: Language): EdgeCoverage {
-  return lang === "cpp" || lang === "bash" ? "inferred-only" : "full";
+  return lang === "cpp" || lang === "bash" || lang === "swift" ? "inferred-only" : "full";
 }
 
 /**
@@ -78,6 +79,7 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".bash", grammar: "bash", label: "shell" },
   { ext: ".sh", grammar: "bash", label: "shell" },
   { ext: ".java", grammar: "java", label: "java" },
+  { ext: ".swift", grammar: "swift", label: "swift" },
 ];
 
 function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
@@ -199,6 +201,11 @@ const JAVA_KINDS: Record<string, Kind> = {
   constructor_declaration: "method",
 };
 
+// Swift: one grammar node (`class_declaration`) spells class/struct/enum/
+// extension apart only by keyword token, so describeSwift() resolves kinds
+// dynamically; this map stays empty on purpose.
+const SWIFT_KINDS: Record<string, Kind> = {};
+
 // Shell: functions are the only definition shape (`foo() {}` and
 // `function foo {}` both parse as function_definition with a name field).
 const BASH_KINDS: Record<string, Kind> = {
@@ -213,6 +220,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   cpp: CPP_KINDS,
   bash: BASH_KINDS,
   java: JAVA_KINDS,
+  swift: SWIFT_KINDS,
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -231,6 +239,7 @@ const GRAMMARS: Record<Language, unknown> = {
   cpp: Cpp,
   bash: Bash,
   java: Java,
+  swift: Swift,
 };
 
 export interface WalkCtx {
@@ -371,7 +380,9 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
               ? true // no module/visibility system at Tier-1
               : ctx.lang === "java"
                 ? javaExported(node)
-                : tsExported(node),
+                : ctx.lang === "swift"
+                  ? swiftExported(node)
+                  : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -383,8 +394,8 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     });
     // structural containment
     edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
-    // class heritage (C++ structs inherit too — default-public class)
-    if (desc.kind === "class" || (ctx.lang === "cpp" && desc.kind === "struct"))
+    // class heritage (C++ structs inherit too; Swift structs conform to protocols)
+    if (desc.kind === "class" || ((ctx.lang === "cpp" || ctx.lang === "swift") && desc.kind === "struct"))
       edges.push(...heritageEdges(node, id, ctx));
 
     // structs count: a C++ struct is a class with default-public members, and its
@@ -569,6 +580,7 @@ function isDeclarationName(node: Parser.SyntaxNode): boolean {
 function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "go") return describeGo(node, ctx);
   if (ctx.lang === "cpp") return describeCpp(node, ctx);
+  if (ctx.lang === "swift") return describeSwift(node, ctx);
   // Java: a bodyless method_declaration (interface/abstract) is a contract,
   // not a definition — indexing it would shadow the one real implementation.
   if (ctx.lang === "java" && node.type === "method_declaration" && !node.childForFieldName("body")) {
@@ -702,6 +714,52 @@ function describeCpp(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | nul
   return null;
 }
 
+/** Swift definition shapes. The grammar's `class_declaration` covers class,
+ * struct, enum, actor AND extension — the keyword token decides the kind
+ * (actor → class; an extension indexes under the extended type's name, so its
+ * methods carry the right owner). `protocol_declaration` → interface, and a
+ * bodyless function (a protocol requirement) is a contract, not a definition. */
+function describeSwift(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
+  const bodyOf = (types: string[]): Parser.SyntaxNode | undefined =>
+    node.namedChildren.find((c) => types.includes(c.type));
+  if (node.type === "function_declaration") {
+    const name = node.childForFieldName("name")?.text;
+    if (!name) return null;
+    const body = bodyOf(["function_body"]);
+    if (!body) return null;
+    const inType =
+      ctx.enclosingKind === "class" || ctx.enclosingKind === "struct" || ctx.enclosingKind === "enum" || ctx.enclosingKind === "interface";
+    return { name, kind: inType ? "method" : "function", headerEnd: body.startIndex, hashNode: node };
+  }
+  if (node.type === "init_declaration" || node.type === "deinit_declaration") {
+    const body = bodyOf(["function_body"]);
+    if (!body) return null;
+    return { name: node.type === "init_declaration" ? "init" : "deinit", kind: "method", headerEnd: body.startIndex, hashNode: node };
+  }
+  if (node.type === "class_declaration") {
+    const name = node.childForFieldName("name")?.text;
+    if (!name) return null;
+    let kw = "class";
+    for (let i = 0; i < node.childCount; i++) {
+      const t = node.child(i)?.type;
+      if (t === "class" || t === "struct" || t === "enum" || t === "extension" || t === "actor") {
+        kw = t;
+        break;
+      }
+    }
+    const kind: Kind = kw === "struct" ? "struct" : kw === "enum" ? "enum" : "class";
+    const body = bodyOf(["class_body", "enum_class_body"]);
+    return { name, kind, headerEnd: body ? body.startIndex : node.endIndex, hashNode: node };
+  }
+  if (node.type === "protocol_declaration") {
+    const name = node.childForFieldName("name")?.text;
+    if (!name) return null;
+    const body = bodyOf(["protocol_body"]);
+    return { name, kind: "interface", headerEnd: body ? body.startIndex : node.endIndex, hashNode: node };
+  }
+  return null;
+}
+
 /** The receiver's base type name for a Go method, unwrapping a pointer receiver
  * (`func (u *User) …` → `User`). Null if it can't be read. */
 function goReceiverType(node: Parser.SyntaxNode): string | null {
@@ -722,6 +780,14 @@ function goExported(name: string): boolean {
 
 function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): RawEdge[] {
   const edges: RawEdge[] = [];
+  if (ctx.lang === "swift") {
+    for (const spec of node.namedChildren.filter((c) => c.type === "inheritance_specifier")) {
+      const t = spec.namedChildren.find((c) => c.type === "user_type");
+      const name = t?.namedChildren.find((c) => c.type === "type_identifier")?.text ?? t?.text;
+      if (name) edges.push({ source: classId, relation: "extends", name, file: ctx.rel });
+    }
+    return edges;
+  }
   if (ctx.lang === "java") {
     const sup = node.namedChildren.find((c) => c.type === "superclass");
     for (const t of sup?.namedChildren ?? []) {
@@ -776,6 +842,28 @@ function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
 ): { name: string; viaMember: boolean; receiver?: string; recvType?: string } | null {
+  // Swift: call_expression's first child is the callee. An Uppercase bare
+  // name is an initializer (`Vec2(...)`) — a type, not a function — skipped.
+  // navigation (`self.move(...)`, `obj.fire(...)`) yields the receiver text;
+  // untyped receivers drop at resolution.
+  if (lang === "swift") {
+    const fn = node.namedChildren[0];
+    if (!fn) return null;
+    if (fn.type === "simple_identifier") {
+      const first = fn.text[0] ?? "";
+      if (first !== first.toLowerCase() && first === first.toUpperCase()) return null;
+      return { name: fn.text, viaMember: false };
+    }
+    if (fn.type === "navigation_expression") {
+      const suffix = fn.childForFieldName("suffix")?.text?.replace(/^\./, "");
+      if (!suffix) return null;
+      const target = fn.childForFieldName("target");
+      const receiver =
+        target?.type === "self_expression" ? "self" : target?.type === "simple_identifier" ? target.text : undefined;
+      return { name: suffix, viaMember: true, receiver };
+    }
+    return null;
+  }
   // Java: method_invocation carries `name` + optional `object`. No object or
   // `this` → the enclosing class's own method. An Uppercase identifier
   // receiver is a class name by Java convention → a static call, typed by the
@@ -936,6 +1024,14 @@ function clean(raw: string): string | null {
 function javaExported(node: Parser.SyntaxNode): boolean {
   const mods = node.namedChildren.find((c) => c.type === "modifiers");
   return /\bpublic\b/.test(mods?.text ?? "");
+}
+
+/** Swift: private/fileprivate are the only repo-invisible visibilities —
+ * internal (the default) is module-wide, which for a repo graph is public
+ * enough. */
+function swiftExported(node: Parser.SyntaxNode): boolean {
+  const mods = node.namedChildren.find((c) => c.type === "modifiers");
+  return !/\b(private|fileprivate)\b/.test(mods?.text ?? "");
 }
 
 /** TS: a definition is exported if any ancestor is an `export` statement. */

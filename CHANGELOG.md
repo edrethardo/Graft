@@ -60,6 +60,18 @@
   static calls (`Textures.load(...)`) — through the same owner-qualified
   index as Python/Go. `exported` mirrors `public`.
 
+- **Swift (`.swift`) in the Tier-1 symbol graph** — classes, structs, enums,
+  actors, protocols (→ interface), extensions (indexed under the extended
+  type's name so their methods carry the right owner), functions, methods,
+  init/deinit. Bodyless protocol requirements are contracts and are skipped.
+  Calls resolve conservatively (bare same-file/unique names; `self.method()`
+  through the enclosing type; Uppercase bare calls are initializers and are
+  skipped), inheritance clauses emit `extends` resolving against classes and
+  protocols alike, and `exported` = not private/fileprivate. Swift shares the
+  inferred-only edge-coverage class. The `tree-sitter-swift` native build is
+  self-healed by the postinstall script (it ships no prebuilds and its gyp
+  file expects an npm-hoisted path).
+
 ### Fixed
 
 - **Unsupported languages fail loudly instead of masquerading as answers.**
