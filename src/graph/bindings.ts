@@ -93,6 +93,22 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     if (JAVA_DEFS.has(node.type)) return node.childForFieldName("name")?.text ?? null;
     return null;
   }
+  if (lang === "rust") {
+    // Mirror extract.ts's describeRust scope segments. impl blocks emit no
+    // node; extract descends INTO them without pushing a segment, so neither
+    // does this walk — a binding in a method body lands under `Type.method`
+    // only because the function_item itself pushes that.
+    if (node.type === "function_item") {
+      const name = node.childForFieldName("name")?.text;
+      if (!name) return null;
+      const impl = rustEnclosingImplType(node);
+      return impl ? `${impl}.${name}` : name;
+    }
+    if (["struct_item", "enum_item", "trait_item", "type_item", "union_item"].includes(node.type)) {
+      return node.childForFieldName("name")?.text ?? null;
+    }
+    return null;
+  }
   if (lang === "swift") {
     if (node.type === "function_declaration" || node.type === "class_declaration" || node.type === "protocol_declaration") {
       return node.childForFieldName("name")?.text ?? null;
@@ -272,6 +288,46 @@ function javaTypeName(t: Parser.SyntaxNode | null): string | null {
   return null;
 }
 
+/** The self type of the `impl` block a node sits in, if any — used to mirror
+ * extract.ts's `Type.method` scope segments without importing from it. */
+function rustEnclosingImplType(node: Parser.SyntaxNode): string | null {
+  const impl = node.parent?.type === "declaration_list" ? node.parent.parent : null;
+  if (impl?.type !== "impl_item") return null;
+  const t = impl.childForFieldName("type");
+  if (!t) return null;
+  if (t.type === "type_identifier") return t.text;
+  if (t.type === "generic_type") return t.childForFieldName("type")?.text ?? null;
+  if (t.type === "scoped_type_identifier") return t.childForFieldName("name")?.text ?? null;
+  return null;
+}
+
+/** Rust receiver types from declared syntax: `let g: Grid = …` and typed
+ * parameters (`grid: &Grid`), unwrapping references/generics to the base type
+ * name. An untyped `let` binds nothing — no inference from initializers. */
+function handleRust(node: Parser.SyntaxNode, scope: string[], bindings: FileBindings): void {
+  if (node.type !== "let_declaration" && node.type !== "parameter") return;
+  const type = rustTypeName(node.childForFieldName("type"));
+  if (!type) return;
+  const pattern = node.childForFieldName("pattern");
+  if (pattern?.type !== "identifier") return;
+  bindings.set(scope.join("."), pattern.text, type);
+}
+
+/** The bare type name of a Rust type node: plain, referenced (`&Grid`),
+ * generic (`Vec<Grid>` → Vec), or scoped (`world::Grid` → Grid). Primitives
+ * and everything else yield null — nothing member-resolvable. */
+function rustTypeName(t: Parser.SyntaxNode | null): string | null {
+  let n: Parser.SyntaxNode | null = t;
+  while (n && (n.type === "reference_type" || n.type === "pointer_type")) {
+    n = n.childForFieldName("type") ?? n.namedChildren.at(-1) ?? null;
+  }
+  if (!n) return null;
+  if (n.type === "type_identifier") return n.text;
+  if (n.type === "generic_type") return rustTypeName(n.childForFieldName("type"));
+  if (n.type === "scoped_type_identifier") return n.childForFieldName("name")?.text ?? null;
+  return null;
+}
+
 /** Resolves a call site's receiver text (from `calleeName`) to a bound type
  * name, given the enclosing walk state. `self`/`cls`/`this`/the Go receiver
  * var resolve directly to the enclosing class; anything else is a bindings-map
@@ -355,6 +411,7 @@ function visit(
   else if (lang === "go") handleGo(node, scope, bindings);
   else if (lang === "cpp") handleCpp(node, scope, classScope, bindings);
   else if (lang === "java") handleJava(node, scope, classScope, bindings);
+  else if (lang === "rust") handleRust(node, scope, bindings);
   else handleTs(node, scope, classScope, bindings, aliases);
 
   const name = defName(node, lang);

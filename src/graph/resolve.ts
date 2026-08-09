@@ -140,7 +140,9 @@ export function resolveEdges(
             ? resolveCppInclude(e.specifier, e.file, fileIds, byId)
             : e.file.endsWith(".java")
               ? resolveJavaImport(e.specifier, fileIds)
-              : resolveImport(e.specifier, e.file, byId);
+              : e.file.endsWith(".rs")
+                ? resolveRustUse(e.specifier, fileIds)
+                : resolveImport(e.specifier, e.file, byId);
       add(e.source, target, "imports", "extracted");
     } else if (e.relation === "extends" || e.relation === "implements") {
       const kinds: Kind[] = e.relation === "implements" ? ["interface"] : ["class", "interface"];
@@ -219,6 +221,26 @@ function resolveJavaImport(spec: string, fileIds: string[]): string {
   const suffix = `/${path}`;
   const hits = fileIds.filter((id) => id === path || id.endsWith(suffix));
   return hits.length === 1 ? hits[0] : spec;
+}
+
+/**
+ * Resolve a Rust `use` path to a repo file via the module ↔ file convention.
+ * A path names items, not files, so try progressively shorter prefixes:
+ * `crate::world::grid::Grid` → `world/grid/Grid`, then `world/grid` — each as
+ * `<p>.rs` or `<p>/mod.rs`, matched as a unique path suffix. Leading
+ * `crate`/`self`/`super` are position markers, not directories. Ambiguous or
+ * unmatched → the raw spec (external crate), like every other resolver.
+ */
+function resolveRustUse(spec: string, fileIds: string[]): string {
+  const parts = spec.split("::").filter((p) => p && !["crate", "self", "super"].includes(p));
+  for (let end = parts.length; end > 0; end--) {
+    const base = parts.slice(0, end).join("/");
+    for (const cand of [`${base}.rs`, `${base}/mod.rs`]) {
+      const hits = fileIds.filter((id) => id === cand || id.endsWith(`/${cand}`));
+      if (hits.length === 1) return hits[0];
+    }
+  }
+  return spec;
 }
 
 /**

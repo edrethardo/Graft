@@ -14,12 +14,13 @@ import Cpp from "tree-sitter-cpp";
 import Bash from "tree-sitter-bash";
 import Java from "tree-sitter-java";
 import Swift from "tree-sitter-swift";
+import Rust from "tree-sitter-rust";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, cppDeclaratorName, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "bash" | "java" | "swift";
+export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "bash" | "java" | "swift" | "rust";
 
 /**
  * How much edge data a language's extraction can honestly claim (issue #66/#68).
@@ -80,6 +81,7 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".sh", grammar: "bash", label: "shell" },
   { ext: ".java", grammar: "java", label: "java" },
   { ext: ".swift", grammar: "swift", label: "swift" },
+  { ext: ".rs", grammar: "rust", label: "rust" },
 ];
 
 function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
@@ -201,6 +203,17 @@ const JAVA_KINDS: Record<string, Kind> = {
   constructor_declaration: "method",
 };
 
+// Rust: struct/enum/trait/type-alias map straight through; `function_item`
+// and `impl_item` need context (method vs function, self type), so
+// describeRust() handles those dynamically.
+const RUST_KINDS: Record<string, Kind> = {
+  struct_item: "struct",
+  enum_item: "enum",
+  trait_item: "interface",
+  type_item: "type",
+  union_item: "struct",
+};
+
 // Swift: one grammar node (`class_declaration`) spells class/struct/enum/
 // extension apart only by keyword token, so describeSwift() resolves kinds
 // dynamically; this map stays empty on purpose.
@@ -221,6 +234,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   bash: BASH_KINDS,
   java: JAVA_KINDS,
   swift: SWIFT_KINDS,
+  rust: RUST_KINDS,
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -240,6 +254,7 @@ const GRAMMARS: Record<Language, unknown> = {
   bash: Bash,
   java: Java,
   swift: Swift,
+  rust: Rust,
 };
 
 export interface WalkCtx {
@@ -255,6 +270,7 @@ export interface WalkCtx {
   goReceiverVar: string | null; // Go receiver var, e.g. `w` in `func (w *Worker)`
   importedSymbols: ReadonlyMap<string, { name: string; specifier: string }>;
   cppNamespace: string[]; // C++ only: enclosing namespace path, [] elsewhere
+  rustImplType: string | null; // Rust only: the enclosing `impl <Type>`'s self type
 }
 
 /** A definition we're about to emit, normalized across the shapes we handle. */
@@ -318,6 +334,7 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
     goReceiverVar: null,
     importedSymbols,
     cppNamespace: [],
+    rustImplType: null,
   };
   // Every id minted this file, seeded with the file node's own id (`rel`) so a
   // top-level definition can never collide with it. Threaded as its own
@@ -382,7 +399,9 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
                 ? javaExported(node)
                 : ctx.lang === "swift"
                   ? swiftExported(node)
-                  : tsExported(node),
+                  : ctx.lang === "rust"
+                    ? node.namedChildren.some((c) => c.type === "visibility_modifier")
+                    : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -426,6 +445,20 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     return;
   }
 
+  // Rust `impl` blocks emit no node of their own: their methods scope under the
+  // self type, so the walk just carries that type down (and records the trait
+  // relationship when it's a trait impl).
+  if (ctx.lang === "rust" && node.type === "impl_item") {
+    const selfType = rustImplType(node);
+    const traitName = node.childForFieldName("trait")?.text;
+    if (selfType && traitName) {
+      edges.push({ source: ctx.rel, relation: "implements", name: traitName, file: ctx.rel });
+    }
+    const implCtx: WalkCtx = { ...ctx, rustImplType: selfType, enclosingClass: selfType, enclosingKind: "struct" };
+    for (const child of node.namedChildren) walk(child, implCtx, out, edges, minted);
+    return;
+  }
+
   // C++ namespaces don't emit nodes (members keep bare names — see issue #66),
   // but membership is tracked so nodes can carry their `ns` path.
   if (ctx.lang === "cpp" && node.type === "namespace_definition") {
@@ -438,6 +471,8 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
   // not a definition — capture calls/imports/references, then descend with the same context
   const callType =
     ctx.lang === "python" ? "call" : ctx.lang === "bash" ? "command" : ctx.lang === "java" ? "method_invocation" : "call_expression";
+  // Rust: an impl block sets enclosingKind to "struct" for owner purposes, but
+  // scope segments there are already `Type.method`, so nothing else to adjust.
   if (node.type === callType) {
     const callee = calleeName(node, ctx.lang);
     if (callee) {
@@ -581,6 +616,7 @@ function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "go") return describeGo(node, ctx);
   if (ctx.lang === "cpp") return describeCpp(node, ctx);
   if (ctx.lang === "swift") return describeSwift(node, ctx);
+  if (ctx.lang === "rust") return describeRust(node, ctx);
   // Java: a bodyless method_declaration (interface/abstract) is a contract,
   // not a definition — indexing it would shadow the one real implementation.
   if (ctx.lang === "java" && node.type === "method_declaration" && !node.childForFieldName("body")) {
@@ -714,6 +750,46 @@ function describeCpp(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | nul
   return null;
 }
 
+/** Rust definition shapes. Mapped items (struct/enum/trait/type) come off
+ * RUST_KINDS; `function_item` is a method when it sits in an impl block (the
+ * walk carries the self type in `rustImplType`) and a free function otherwise.
+ * A trait's `function_signature_item` has no body — a contract, not a
+ * definition. `impl` blocks themselves emit no node: their methods scope under
+ * the SELF type (`Player.tick`), which is what a `p.tick()` caller means, so an
+ * inherent impl and a trait impl contribute to the same owner. */
+function describeRust(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
+  const mapped = ctx.kinds[node.type];
+  if (mapped) {
+    const name = node.childForFieldName("name")?.text;
+    if (!name) return null;
+    const body = node.childForFieldName("body");
+    return { name, kind: mapped, headerEnd: body ? body.startIndex : node.endIndex, hashNode: node };
+  }
+  if (node.type === "function_item") {
+    const name = node.childForFieldName("name")?.text;
+    if (!name) return null;
+    const body = node.childForFieldName("body");
+    if (!body) return null; // signature only — a trait requirement
+    const owner = ctx.rustImplType;
+    return owner
+      ? { name, idName: `${owner}.${name}`, kind: "method", owner, headerEnd: body.startIndex, hashNode: node }
+      : { name, kind: "function", headerEnd: body.startIndex, hashNode: node };
+  }
+  return null;
+}
+
+/** The self type of an `impl` block: `impl Player`, `impl Tickable for Player`
+ * (the `type` field is the self type in both — `trait` holds the trait), and
+ * `impl<T> Reg<T>` (generic base name). Null when it can't be read. */
+function rustImplType(node: Parser.SyntaxNode): string | null {
+  const t = node.childForFieldName("type");
+  if (!t) return null;
+  if (t.type === "type_identifier") return t.text;
+  if (t.type === "generic_type") return t.childForFieldName("type")?.text ?? null;
+  if (t.type === "scoped_type_identifier") return t.childForFieldName("name")?.text ?? null;
+  return null;
+}
+
 /** Swift definition shapes. The grammar's `class_declaration` covers class,
  * struct, enum, actor AND extension — the keyword token decides the kind
  * (actor → class; an extension indexes under the extended type's name, so its
@@ -842,6 +918,32 @@ function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
 ): { name: string; viaMember: boolean; receiver?: string; recvType?: string } | null {
+  // Rust: `foo()`, `self.m()` / `obj.m()` (field_expression), and
+  // `Type::assoc()` (scoped_identifier — the path IS the receiver type).
+  if (lang === "rust") {
+    const fn = node.childForFieldName("function");
+    if (!fn) return null;
+    if (fn.type === "identifier") return { name: fn.text, viaMember: false };
+    if (fn.type === "field_expression") {
+      const field = fn.childForFieldName("field");
+      const value = fn.childForFieldName("value");
+      if (!field) return null;
+      const receiver = value?.type === "self" ? "self" : value?.type === "identifier" ? value.text : undefined;
+      return { name: field.text, viaMember: true, receiver };
+    }
+    if (fn.type === "scoped_identifier") {
+      const name = fn.childForFieldName("name")?.text;
+      const path = fn.childForFieldName("path")?.text;
+      if (!name) return null;
+      // `Self::new()` means the enclosing impl type; a lowercase path is a
+      // module (`util::helper()`), which is a bare-name call, not a receiver.
+      const first = path?.[0] ?? "";
+      const isType = !!path && first !== first.toLowerCase() && first === first.toUpperCase();
+      if (!isType) return { name, viaMember: false };
+      return { name, viaMember: true, recvType: path === "Self" ? undefined : path, receiver: path === "Self" ? "self" : undefined };
+    }
+    return null;
+  }
   // Swift: call_expression's first child is the callee. An Uppercase bare
   // name is an initializer (`Vec2(...)`) — a type, not a function — skipped.
   // navigation (`self.move(...)`, `obj.fire(...)`) yields the receiver text;
@@ -976,6 +1078,7 @@ function isImport(node: Parser.SyntaxNode, lang: Language): boolean {
   if (lang === "go") return node.type === "import_spec";
   if (lang === "cpp") return node.type === "preproc_include";
   if (lang === "java") return node.type === "import_declaration";
+  if (lang === "rust") return node.type === "use_declaration";
   return node.type === "import_statement" || node.type === "import_from_statement";
 }
 
@@ -1002,6 +1105,14 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
     // `import com.game.util.Textures;` — the dotted path; wildcard and static
     // imports keep their raw text and simply fail file resolution downstream.
     const spec = node.namedChildren.find((c) => c.type === "scoped_identifier" || c.type === "identifier");
+    return spec?.text ?? null;
+  }
+  if (lang === "rust") {
+    // `use crate::world::grid::Grid;` — the `::` path. Grouped/glob uses keep
+    // their raw text and simply fail file resolution downstream.
+    const spec = node.namedChildren.find(
+      (c) => c.type === "scoped_identifier" || c.type === "identifier" || c.type === "use_as_clause",
+    );
     return spec?.text ?? null;
   }
   const str = node.namedChildren.find((c) => c.type === "string");

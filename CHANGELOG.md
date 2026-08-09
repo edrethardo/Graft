@@ -72,6 +72,20 @@
   self-healed by the postinstall script (it ships no prebuilds and its gyp
   file expects an npm-hoisted path).
 
+- **Rust (`.rs`) in the Tier-1 symbol graph** — structs, enums, unions, traits
+  (→ interface), type aliases, free functions, and `impl` methods. An
+  inherent `impl Player` and a trait `impl Tickable for Player` both scope
+  their methods under the self type (`Player.tick`), which is what a caller
+  writing `p.tick()` means; a trait's bodyless `function_signature_item` is a
+  contract and is skipped, and a trait impl emits an `implements` edge. `use`
+  paths resolve through the module ↔ file convention (`crate::world::grid` →
+  `world/grid.rs` or `world/grid/mod.rs`, longest prefix first). Calls resolve
+  through the shared conservative resolver: bare names, `self.m()` and
+  `Self::assoc()` through the enclosing impl type, `Type::assoc()` through the
+  owner-qualified index, and `obj.m()` typed by declared `let x: T` /
+  parameter types (references and generics unwrapped). `exported` = has a
+  `pub` visibility modifier.
+
 ### Fixed
 
 - **Unsupported languages fail loudly instead of masquerading as answers.**
