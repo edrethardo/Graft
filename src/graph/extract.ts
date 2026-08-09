@@ -12,6 +12,7 @@ import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
 import Java from "tree-sitter-java";
 import Cpp from "tree-sitter-cpp";
+import Bash from "tree-sitter-bash";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, cppDeclaratorName, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
@@ -19,6 +20,7 @@ import type { Kind, NodeV1, Relation } from "./types.js";
 
 export type Language = "typescript" | "tsx" | "python" | "go" | "java";
 export type Language = "typescript" | "tsx" | "python" | "go" | "cpp";
+export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "bash";
 
 /**
  * How much edge data a language's extraction can honestly claim (issue #66/#68).
@@ -34,7 +36,7 @@ export type Language = "typescript" | "tsx" | "python" | "go" | "cpp";
 export type EdgeCoverage = "full" | "inferred-only";
 
 export function edgeCoverageOf(lang: Language): EdgeCoverage {
-  return lang === "cpp" ? "inferred-only" : "full";
+  return lang === "cpp" || lang === "bash" ? "inferred-only" : "full";
 }
 
 /**
@@ -76,6 +78,8 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".hh", grammar: "cpp", label: "c/c++" },
   { ext: ".c", grammar: "cpp", label: "c/c++" },
   { ext: ".h", grammar: "cpp", label: "c/c++" },
+  { ext: ".bash", grammar: "bash", label: "shell" },
+  { ext: ".sh", grammar: "bash", label: "shell" },
 ];
 
 function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
@@ -211,6 +215,12 @@ const JAVA_TYPE_KINDS: ReadonlySet<Kind> = new Set<Kind>(["class", "interface", 
 // (or on having a body at all), so describeCpp() resolves them dynamically.
 const CPP_KINDS: Record<string, Kind> = {};
 
+// Shell: functions are the only definition shape (`foo() {}` and
+// `function foo {}` both parse as function_definition with a name field).
+const BASH_KINDS: Record<string, Kind> = {
+  function_definition: "function",
+};
+
 const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   typescript: TS_KINDS,
   tsx: TS_KINDS,
@@ -233,6 +243,7 @@ const CALL_TYPES: Record<Language, ReadonlySet<string>> = {
   go: new Set(["call_expression"]),
   java: new Set(["method_invocation", "object_creation_expression"]),
   cpp: CPP_KINDS,
+  bash: BASH_KINDS,
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -250,6 +261,7 @@ const GRAMMARS: Record<Language, unknown> = {
   go: Go,
   java: Java,
   cpp: Cpp,
+  bash: Bash,
 };
 
 export interface WalkCtx {
@@ -392,6 +404,8 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
               ? javaExported(node)
             : ctx.lang === "cpp"
               ? true // no module system at Tier-1; linkage analysis is out of scope
+            : ctx.lang === "cpp" || ctx.lang === "bash"
+              ? true // no module/visibility system at Tier-1
               : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
@@ -459,6 +473,8 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
   // not a definition — capture calls/imports/references, then descend with the same context
   const callTypes = CALL_TYPES[ctx.lang];
   if (callTypes.has(node.type)) {
+  const callType = ctx.lang === "python" ? "call" : ctx.lang === "bash" ? "command" : "call_expression";
+  if (node.type === callType) {
     const callee = calleeName(node, ctx.lang);
     if (callee) {
       const callEdge: RawEdge = {
@@ -887,6 +903,17 @@ function calleeName(
     return { name: nameNode.text, viaMember: true, receiver: javaReceiver(obj) };
   }
 
+  // Shell: a `command` node's callee is its `name` field. Only a name that
+  // matches a repo-defined function will resolve — external binaries and
+  // builtins drop out at resolution. `source`/`.` is sourcing, not a call
+  // (and deliberately not an import either: the path is routinely
+  // variable-interpolated, and a partial capture would read as a complete one).
+  if (lang === "bash") {
+    const name = node.childForFieldName("name");
+    if (name?.type !== "command_name") return null;
+    if (name.text === "source" || name.text === ".") return null;
+    return { name: name.text, viaMember: false };
+  }
   const fn = node.childForFieldName("function");
   if (!fn) return null;
   if (fn.type === "identifier") return { name: fn.text, viaMember: false };

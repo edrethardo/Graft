@@ -14,6 +14,17 @@
   calls (`game::spawn(1)`) and preferring the same-namespace candidate on
   remaining ties. Ambiguity at every level still drops — never guess.
 
+- **Shell (`.sh`, `.bash`) in the Tier-1 symbol graph** — functions (both
+  `foo() {}` and `function foo {}` syntaxes) parse with `tree-sitter-bash`
+  under a `shell` label, so `skeleton`/`grep`/`ask` cover shell scripts. Calls
+  are `command` names resolved through the same conservative resolver
+  (same-file → extracted, repo-unique → inferred, ambiguous dropped) — an
+  external binary or builtin never resolves, so it never dangles. `source` is
+  deliberately not an import edge: its path is routinely variable-interpolated,
+  and a partial capture would read as a complete one. Shell shares C/C++'s
+  inferred-only edge coverage, so empty `callers` results phrase themselves as
+  possible undercount.
+
 ### Fixed
 
 - **`npm install -g @nanonets/graft@latest` could silently do nothing.** The
