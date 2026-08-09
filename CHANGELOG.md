@@ -49,6 +49,17 @@
   calls (`game::spawn(1)`) and preferring the same-namespace candidate on
   remaining ties. Ambiguity at every level still drops — never guess.
 
+- **Java (`.java`) in the Tier-1 symbol graph** — classes, interfaces, enums,
+  records, methods and constructors parse with `tree-sitter-java` (bodyless
+  interface/abstract method declarations are contracts, not definitions, and
+  are skipped like every language's prototypes). Imports resolve by the
+  package-path ↔ directory convention (`com.game.util.Textures` → the unique
+  file ending `com/game/util/Textures.java`); `extends`/`implements` edges
+  come from the declaration; calls resolve through receiver types — declared
+  locals/params/fields, implicit and explicit `this`, and Uppercase-receiver
+  static calls (`Textures.load(...)`) — through the same owner-qualified
+  index as Python/Go. `exported` mirrors `public`.
+
 ### Fixed
 
 - **Unsupported languages fail loudly instead of masquerading as answers.**

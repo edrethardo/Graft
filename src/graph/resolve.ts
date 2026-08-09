@@ -138,7 +138,9 @@ export function resolveEdges(
           ? resolveGoImport(e.specifier, opts.goModules!, goFilesByDir)
           : cpp(e.file)
             ? resolveCppInclude(e.specifier, e.file, fileIds, byId)
-            : resolveImport(e.specifier, e.file, byId);
+            : e.file.endsWith(".java")
+              ? resolveJavaImport(e.specifier, fileIds)
+              : resolveImport(e.specifier, e.file, byId);
       add(e.source, target, "imports", "extracted");
     } else if (e.relation === "extends" || e.relation === "implements") {
       const kinds: Kind[] = e.relation === "implements" ? ["interface"] : ["class", "interface"];
@@ -204,6 +206,19 @@ export function resolveEdges(
     }
   }
   return out;
+}
+
+/**
+ * Resolve a Java import's dotted path via the package ↔ directory convention:
+ * `com.game.util.Textures` names the unique repo file ending
+ * `com/game/util/Textures.java`. Wildcard/static imports fail the match and
+ * keep their raw text — external, exactly like an unresolved TS specifier.
+ */
+function resolveJavaImport(spec: string, fileIds: string[]): string {
+  const path = `${spec.replace(/\./g, "/")}.java`;
+  const suffix = `/${path}`;
+  const hits = fileIds.filter((id) => id === path || id.endsWith(suffix));
+  return hits.length === 1 ? hits[0] : spec;
 }
 
 /**

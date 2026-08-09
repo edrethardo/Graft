@@ -12,12 +12,13 @@ import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
 import Cpp from "tree-sitter-cpp";
 import Bash from "tree-sitter-bash";
+import Java from "tree-sitter-java";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, cppDeclaratorName, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "bash";
+export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "bash" | "java";
 
 /**
  * How much edge data a language's extraction can honestly claim (issue #66/#68).
@@ -76,6 +77,7 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".h", grammar: "cpp", label: "c/c++" },
   { ext: ".bash", grammar: "bash", label: "shell" },
   { ext: ".sh", grammar: "bash", label: "shell" },
+  { ext: ".java", grammar: "java", label: "java" },
 ];
 
 function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
@@ -185,6 +187,18 @@ const GO_KINDS: Record<string, Kind> = {
 // (or on having a body at all), so describeCpp() resolves them dynamically.
 const CPP_KINDS: Record<string, Kind> = {};
 
+// Java: every mapped shape carries a `name` field, so the generic describe()
+// path handles them; records are classes with value semantics. Bodyless
+// method declarations (interface/abstract contracts) are skipped in describe().
+const JAVA_KINDS: Record<string, Kind> = {
+  class_declaration: "class",
+  record_declaration: "class",
+  interface_declaration: "interface",
+  enum_declaration: "enum",
+  method_declaration: "method",
+  constructor_declaration: "method",
+};
+
 // Shell: functions are the only definition shape (`foo() {}` and
 // `function foo {}` both parse as function_definition with a name field).
 const BASH_KINDS: Record<string, Kind> = {
@@ -198,6 +212,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   go: GO_KINDS,
   cpp: CPP_KINDS,
   bash: BASH_KINDS,
+  java: JAVA_KINDS,
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -215,6 +230,7 @@ const GRAMMARS: Record<Language, unknown> = {
   go: Go,
   cpp: Cpp,
   bash: Bash,
+  java: Java,
 };
 
 export interface WalkCtx {
@@ -353,7 +369,9 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
             ? goExported(desc.name)
             : ctx.lang === "cpp" || ctx.lang === "bash"
               ? true // no module/visibility system at Tier-1
-              : tsExported(node),
+              : ctx.lang === "java"
+                ? javaExported(node)
+                : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -407,7 +425,8 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
   }
 
   // not a definition — capture calls/imports/references, then descend with the same context
-  const callType = ctx.lang === "python" ? "call" : ctx.lang === "bash" ? "command" : "call_expression";
+  const callType =
+    ctx.lang === "python" ? "call" : ctx.lang === "bash" ? "command" : ctx.lang === "java" ? "method_invocation" : "call_expression";
   if (node.type === callType) {
     const callee = calleeName(node, ctx.lang);
     if (callee) {
@@ -550,6 +569,11 @@ function isDeclarationName(node: Parser.SyntaxNode): boolean {
 function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "go") return describeGo(node, ctx);
   if (ctx.lang === "cpp") return describeCpp(node, ctx);
+  // Java: a bodyless method_declaration (interface/abstract) is a contract,
+  // not a definition — indexing it would shadow the one real implementation.
+  if (ctx.lang === "java" && node.type === "method_declaration" && !node.childForFieldName("body")) {
+    return null;
+  }
 
   const mapped = ctx.kinds[node.type];
   if (mapped) {
@@ -698,6 +722,18 @@ function goExported(name: string): boolean {
 
 function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): RawEdge[] {
   const edges: RawEdge[] = [];
+  if (ctx.lang === "java") {
+    const sup = node.namedChildren.find((c) => c.type === "superclass");
+    for (const t of sup?.namedChildren ?? []) {
+      if (t.type === "type_identifier") edges.push({ source: classId, relation: "extends", name: t.text, file: ctx.rel });
+    }
+    const ifaces = node.namedChildren.find((c) => c.type === "super_interfaces");
+    const list = ifaces?.namedChildren.find((c) => c.type === "type_list");
+    for (const t of list?.namedChildren ?? []) {
+      if (t.type === "type_identifier") edges.push({ source: classId, relation: "implements", name: t.text, file: ctx.rel });
+    }
+    return edges;
+  }
   if (ctx.lang === "cpp") {
     // `class RigidBody : public Body { ... }` — base_class_clause children are
     // the base type names (access specifiers are unnamed siblings).
@@ -740,6 +776,30 @@ function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
 ): { name: string; viaMember: boolean; receiver?: string; recvType?: string } | null {
+  // Java: method_invocation carries `name` + optional `object`. No object or
+  // `this` → the enclosing class's own method. An Uppercase identifier
+  // receiver is a class name by Java convention → a static call, typed by the
+  // receiver text itself. `this.field.m()` defers to the field's binding.
+  if (lang === "java") {
+    const nameN = node.childForFieldName("name");
+    if (!nameN) return null;
+    const name = nameN.text;
+    const obj = node.childForFieldName("object");
+    if (!obj || obj.type === "this") return { name, viaMember: true, receiver: "this" };
+    if (obj.type === "identifier") {
+      const first = obj.text[0] ?? "";
+      if (first !== first.toLowerCase() && first === first.toUpperCase()) {
+        return { name, viaMember: true, recvType: obj.text };
+      }
+      return { name, viaMember: true, receiver: obj.text };
+    }
+    if (obj.type === "field_access") {
+      const fobj = obj.childForFieldName("object");
+      const ffield = obj.childForFieldName("field");
+      if (fobj?.type === "this" && ffield) return { name, viaMember: true, receiver: `this.${ffield.text}` };
+    }
+    return { name, viaMember: true }; // untyped receiver — dropped at resolve
+  }
   // Shell: a `command` node's callee is its `name` field. Only a name that
   // matches a repo-defined function will resolve — external binaries and
   // builtins drop out at resolution. `source`/`.` is sourcing, not a call
@@ -827,6 +887,7 @@ function isImport(node: Parser.SyntaxNode, lang: Language): boolean {
   // (`import ( … )`) forms each yield one edge as the walk recurses into the list.
   if (lang === "go") return node.type === "import_spec";
   if (lang === "cpp") return node.type === "preproc_include";
+  if (lang === "java") return node.type === "import_declaration";
   return node.type === "import_statement" || node.type === "import_from_statement";
 }
 
@@ -849,6 +910,12 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
     if (path?.type !== "string_literal") return null;
     return path.text.replace(/^"|"$/g, "");
   }
+  if (lang === "java") {
+    // `import com.game.util.Textures;` — the dotted path; wildcard and static
+    // imports keep their raw text and simply fail file resolution downstream.
+    const spec = node.namedChildren.find((c) => c.type === "scoped_identifier" || c.type === "identifier");
+    return spec?.text ?? null;
+  }
   const str = node.namedChildren.find((c) => c.type === "string");
   if (!str) return null;
   const frag = str.namedChildren.find((c) => c.type === "string_fragment");
@@ -863,6 +930,12 @@ function clean(raw: string): string | null {
     .replace(/(=>|[{:=])\s*$/, "")
     .trim();
   return sig || null;
+}
+
+/** Java: visibility is spelled on the node — `public` means exported. */
+function javaExported(node: Parser.SyntaxNode): boolean {
+  const mods = node.namedChildren.find((c) => c.type === "modifiers");
+  return /\bpublic\b/.test(mods?.text ?? "");
 }
 
 /** TS: a definition is exported if any ancestor is an `export` statement. */

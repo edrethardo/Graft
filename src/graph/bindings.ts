@@ -79,6 +79,20 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     }
     return null;
   }
+  if (lang === "java") {
+    const JAVA_DEFS = new Set([
+      "class_declaration",
+      "record_declaration",
+      "interface_declaration",
+      "enum_declaration",
+      "method_declaration",
+      "constructor_declaration",
+    ]);
+    // Bodyless methods are skipped by describe(), but pushing their (empty)
+    // scope here is harmless — nothing inside them can bind.
+    if (JAVA_DEFS.has(node.type)) return node.childForFieldName("name")?.text ?? null;
+    return null;
+  }
   if (lang === "cpp") {
     // Mirror extract.ts's describeCpp scope segments: an out-of-class method
     // pushes `Owner.name` (its idName), a named body-bearing specifier its name.
@@ -203,6 +217,53 @@ function cppBindingName(d: Parser.SyntaxNode | null): string | null {
   return null;
 }
 
+/** Java receiver types from declared syntax: locals
+ * (`Mesh m = ...;`), parameters (`int size` skipped — primitives bind
+ * nothing), and class fields. Fields are stored twice under the class scope —
+ * bare (`mesh`, for `mesh.upload()`) and self-prefixed (`self.mesh`, so the
+ * existing `this.`→`self.` receiver normalization finds `this.mesh.upload()`). */
+function handleJava(
+  node: Parser.SyntaxNode,
+  scope: string[],
+  classScope: string | null,
+  bindings: FileBindings,
+): void {
+  const isField = node.type === "field_declaration";
+  if (node.type !== "local_variable_declaration" && node.type !== "formal_parameter" && !isField) return;
+  const type = javaTypeName(node.childForFieldName("type"));
+  if (!type) return;
+  if (node.type === "formal_parameter") {
+    const name = node.childForFieldName("name")?.text;
+    if (name) bindings.set(scope.join("."), name, type);
+    return;
+  }
+  const scopeKey = isField ? (classScope ?? scope.join(".")) : scope.join(".");
+  for (const child of node.namedChildren) {
+    if (child.type !== "variable_declarator") continue;
+    const name = child.childForFieldName("name")?.text;
+    if (!name) continue;
+    bindings.set(scopeKey, name, type);
+    if (isField) bindings.set(scopeKey, `self.${name}`, type);
+  }
+}
+
+/** The bare type name of a Java type node: plain (`Mesh`), generic
+ * (`List<Mesh>` → List), or package-qualified (`com.x.Mesh` → Mesh).
+ * Primitives and arrays yield null — nothing member-resolvable. */
+function javaTypeName(t: Parser.SyntaxNode | null): string | null {
+  if (!t) return null;
+  if (t.type === "type_identifier") return t.text;
+  if (t.type === "generic_type") {
+    const name = t.namedChildren.find((c) => c.type === "type_identifier" || c.type === "scoped_type_identifier");
+    return name ? javaTypeName(name) : null;
+  }
+  if (t.type === "scoped_type_identifier") {
+    const last = t.namedChildren.at(-1);
+    return last?.type === "type_identifier" ? last.text : null;
+  }
+  return null;
+}
+
 /** Resolves a call site's receiver text (from `calleeName`) to a bound type
  * name, given the enclosing walk state. `self`/`cls`/`this`/the Go receiver
  * var resolve directly to the enclosing class; anything else is a bindings-map
@@ -238,6 +299,7 @@ function isClassNode(node: Parser.SyntaxNode, lang: Language): boolean {
     return node.type === "class_declaration" || node.type === "abstract_class_declaration";
   }
   if (lang === "cpp") return node.type === "class_specifier" || node.type === "struct_specifier";
+  if (lang === "java") return node.type === "class_declaration" || node.type === "record_declaration";
   return false;
 }
 
@@ -283,6 +345,7 @@ function visit(
   if (lang === "python") handlePy(node, scope, classScope, bindings, aliases);
   else if (lang === "go") handleGo(node, scope, bindings);
   else if (lang === "cpp") handleCpp(node, scope, classScope, bindings);
+  else if (lang === "java") handleJava(node, scope, classScope, bindings);
   else handleTs(node, scope, classScope, bindings, aliases);
 
   const name = defName(node, lang);
