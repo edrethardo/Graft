@@ -45,6 +45,11 @@ export interface NodeV1 {
   // index) key off a stored field instead of re-deriving it by slicing `id`,
   // which breaks once ids can carry a dedup ordinal (`Cache.get~2`).
   owner?: string;
+  // C++ nodes only: the enclosing namespace path, dot-joined ("game.ai").
+  // Namespaces don't scope ids (members keep bare names), so this is the one
+  // record of namespace membership — resolve.ts matches qualified calls
+  // (`game::spawn()`) and breaks same-name ties against it.
+  ns?: string;
 
   // location (Tier-1, deterministic)
   path: string; // repo-relative: "src/cache.ts"

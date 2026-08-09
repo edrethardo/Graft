@@ -37,6 +37,18 @@
   inferred-only edge coverage, so empty `callers` results phrase themselves as
   possible undercount.
 
+- **C/C++ edge coverage approaching the import-binding languages** (issue
+  [#68], step 2 of the plan): receiver types now come from declared syntax —
+  locals (`Body body;`), parameters (`Entity* e`), and same-file class fields —
+  so `obj.method()` / `ptr->method()` resolve through the owner-qualified
+  index exactly like Python/Go receivers; quoted `#include`s become `imports`
+  edges (same-dir first, then unique path-suffix match; `<...>` skipped); the
+  include closure (plus the `.h` ↔ `.cpp` stem convention) breaks bare-call
+  ties the repo-global uniqueness gate must refuse; and C++ nodes carry their
+  enclosing namespace path (`ns: "game.ai"`), resolving namespace-qualified
+  calls (`game::spawn(1)`) and preferring the same-namespace candidate on
+  remaining ties. Ambiguity at every level still drops — never guess.
+
 ### Fixed
 
 - **Unsupported languages fail loudly instead of masquerading as answers.**
