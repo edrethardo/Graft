@@ -1,3 +1,13 @@
+> **Fork notice (edrethardo/Graft):** this fork extends upstream Graft with
+> C/C++, shell, and Java in the Tier-1 symbol graph, receiver-typed +
+> include-closure + namespace call-edge resolution for C++, and honest
+> reporting for unsupported languages. Everything is offered upstream
+> (NanoNets/Graft [#66](https://github.com/NanoNets/Graft/issues/66),
+> [#67](https://github.com/NanoNets/Graft/pull/67),
+> [#68](https://github.com/NanoNets/Graft/issues/68)) and this fork tracks
+> upstream `main`; it exists so the features are usable while review is slow.
+> See [CHANGELOG.md](CHANGELOG.md) ("Unreleased") for the full delta.
+
 <div align="center">
 
 <img src="assets/graft-hero.png" alt="Graft — open-source context layer for large codebases" width="100%"/>

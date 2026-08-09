@@ -1,6 +1,10 @@
 {
   "name": "@nanonets/graft",
+<<<<<<< HEAD
   "version": "0.11.0",
+=======
+  "version": "0.9.2-fork.1",
+>>>>>>> 10649f8 (Mark fork: version 0.9.1-fork.1 + README fork notice)
   "description": "Build a repo's context graph as a folder of linked markdown files that live in the repo and stay in sync with the code through git.",
   "keywords": [
     "ai",
