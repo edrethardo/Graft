@@ -1,4 +1,5 @@
 import { basename } from 'node:path';
+import { graftLine } from '../context/savings.js';
 import type { Stats, SessionState } from './state.js';
 import type { GraphV1, EdgeV1 } from '../graph/types.js';
 // The injection gate reuses the federation floors rather than inventing its own:
@@ -31,8 +32,8 @@ export function renderStatusline(
   }
   const top = [C.muted('◤ ') + C.indigo('graft'), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];
   top.push(freshnessSegment(stats));
-  const saved = session?.savedTokens ?? 0;
-  if (saved > 0) top.push(C.indigo(`~${saved.toLocaleString()} tok saved`));
+  const calls = session?.graftCalls ?? 0;
+  if (calls > 0) top.push(C.indigo(`${calls.toLocaleString()} graft call${calls === 1 ? '' : 's'}`));
 
   const bottom: string[] = [];
   if (typeof ctx.ctxPct === 'number') bottom.push(C.text(`ctx ${ctx.ctxPct}%`));
@@ -74,7 +75,7 @@ export interface AskJson {
   query: string; mode: string;
   hits: { kind: string; title: string; pointer: string; snippet: string; score: number; code?: string }[];
   /** Set by `ask --source`: whole size of the files these hits cover (baseline). */
-  saved?: { files: number; baselineChars: number };
+  saved?: { files: number };
   /** Lexical mode: share (0..1) of the query's distinct terms the top hit matched. */
   coverage?: number;
   /** Lexical mode: the same share over the top hit's NAME field only — "did the
@@ -107,28 +108,13 @@ function retrievalBody(hits: AskJson['hits']): string {
   return `${header}\n${blocks.join('\n')}`;
 }
 
-/** Tokens saved (baseline − this pack), or 0 when no honest estimate applies. */
-export function retrievalTokensSaved(ask: AskJson, cap = 5): number {
-  const hits = (ask.hits ?? []).slice(0, cap);
-  if (!hits.length || !ask.saved || ask.saved.baselineChars <= 0) return 0;
-  const pack = tokensOf(retrievalBody(hits).length);
-  const base = tokensOf(ask.saved.baselineChars);
-  return base > pack ? base - pack : 0;
-}
-
 export function formatRetrieval(ask: AskJson, cap = 5): string | null {
   const hits = (ask.hits ?? []).slice(0, cap);
   if (!hits.length) return null;
   const body = retrievalBody(hits);
-  const saved = retrievalTokensSaved(ask, cap);
-  if (saved <= 0) return body;
-  const base = tokensOf(ask.saved!.baselineChars);
-  const pct = Math.round((saved / base) * 100);
-  return (
-    `${body}\n[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%); this pack ≈ ` +
-    `${tokensOf(body.length).toLocaleString()} tok vs reading the ${ask.saved!.files} file(s) whole ≈ ` +
-    `${base.toLocaleString()} tok (estimate).`
-  );
+  // Marker, not a savings estimate: the old line claimed the tokens you'd have
+  // spent reading every covered file in full, which nobody would have done.
+  return `${graftLine(ask.saved)}\n${body}`;
 }
 
 /**
@@ -217,7 +203,7 @@ export function formatOrientation(indexMd: string, budgetBytes = 1500, staleNote
     `  In a monorepo, add --in <path>/ to ask/grep/callers to scope to one sub-project; hits are labeled [scope/].\n` +
     `  Already know the file or symbol to change? Go straight to it: graft grep "<symbol>", read the span, edit. Save ask for when you don't yet know where the code lives.\n` +
     `  Refactor, rename, or multi-file change? Run graft callers <sym> --depth all FIRST to map every connected file; editing the primary file and stopping is the classic miss (platform siblings, a new file to extract).\n` +
-    `Each tool opens its output with a "[graft] tokens saved ≈ N" line; when you used graft this turn, close your reply with a one-line tally of the total saved (e.g. 🌱 graft saved ~12k tokens this turn, 3 calls). Never pipe a graft command through head/tail — it is already capped, and clipping drops that line.\n`;
+    `Each tool opens its output with a "[graft] answered from the index" line; when you used graft this turn, say so in one short line at the end of your reply (e.g. 🌱 graft · 3 calls). State only that graft was used and how many calls — never a tokens-saved figure. Never pipe a graft command through head/tail — it is already capped, and clipping drops that line.\n`;
   const banner = staleNote ? `${staleNote}\n\n` : "";
   return `${banner}${directive}\nrepo map (graft/INDEX.md):\n${indexMd.slice(0, budgetBytes)}`;
 }

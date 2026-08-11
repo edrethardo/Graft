@@ -1,95 +1,69 @@
 /**
- * Shared "tokens saved" estimate for every retrieval-style graft command.
+ * The shared "graft answered this" marker every retrieval-style command prints.
  *
- * The model is always the same: baseline (what you'd have read otherwise, in
- * full) − this output (what graft handed you). The baseline is measured from
- * the `chars` the build stored on each file node, so it costs nothing and is
- * honest about the alternative — opening the files whole. When no file in the
- * baseline has a known size (a pre-`chars` graph), the estimate is omitted
- * rather than faked.
+ * This module used to render a tokens-saved estimate: baseline (every covered
+ * file read in full) − this output. That baseline is not what anyone would
+ * actually have done — the alternative to `graft grep` is one `grep -rn`, and
+ * the alternative to `graft skeleton` is reading one file, not twelve — so the
+ * number ran an order of magnitude high (a single grep claimed ~130k tokens
+ * saved). Worse, the line carried an instruction telling the agent to total
+ * those numbers and repeat them to the user, which turned an internal estimate
+ * into a confident claim nobody could check.
  *
- * `graft ask` keeps its own footer (it carries an escalation nudge and feeds
- * the session saved-token counter); everything else — skeleton, grep, callers,
- * map — routes through {@link savingsFor} + {@link withSavings} here.
+ * What a reader actually needs is that graft answered instead of a blind file
+ * read, and how much of the repo that answer covers. Both are facts. The line
+ * carries exactly those, and the session counter counts calls rather than
+ * summing invented tokens.
+ *
+ * `graft ask` renders its own line (it also carries an escalation nudge);
+ * everything else — skeleton, grep, callers, map — routes through
+ * {@link coverageFor} + {@link withGraftLine} here.
  */
 import type { GraphV1 } from '../graph/types.js';
 
-export interface Savings {
-  /** How many source files the baseline covers. */
+/** How much of the repo an answer covers. */
+export interface Coverage {
+  /** How many indexed source files the answer draws on. */
   files: number;
-  /** Total chars of those files — the "read them whole" cost. */
-  baselineChars: number;
 }
 
-/** Rough tokens for a byte length (≈ 4 chars/token; good enough for an estimate). */
+/** The literal prefix every graft-rendered output opens with. Stable and
+ * unique: `claude/hooks.ts` counts occurrences of exactly this string to keep
+ * the session's graft-call tally, so it must not appear twice in one output
+ * and must not drift without updating that counter. */
+export const GRAFT_MARKER = '[graft] answered from the index';
+
+/** Rough tokens for a byte length (≈ 4 chars/token). Retained for callers that
+ * size *source* (e.g. crux budgeting); no longer used to claim savings. */
 export function toTokens(chars: number): number {
   return Math.round(chars / 4);
 }
 
-/** path → char size, from the file nodes the build sized. Skips nodes with no
- * `chars` (pre-upgrade graphs), so an old index just yields a smaller baseline
- * rather than a wrong one. */
-function fileSizes(graph: GraphV1): Map<string, number> {
-  const m = new Map<string, number>();
-  for (const n of graph.nodes)
-    if (n.kind === 'file' && typeof n.chars === 'number') m.set(n.path, n.chars);
-  return m;
-}
-
-/** Baseline = whole size of the distinct `paths`, summed from file-node sizes.
- * Returns undefined when not a single path has a known size — the caller then
- * omits the estimate instead of claiming a bogus one. */
-export function savingsFor(graph: GraphV1, paths: Iterable<string>): Savings | undefined {
-  const sizes = fileSizes(graph);
-  let baselineChars = 0;
+/** How many of `paths` are files the graph actually indexed, counted once each.
+ * Undefined when none are — the caller then prints the bare marker rather than
+ * an empty "0 file(s)". */
+export function coverageFor(graph: GraphV1, paths: Iterable<string>): Coverage | undefined {
+  const indexed = new Set<string>();
+  for (const n of graph.nodes) if (n.kind === 'file') indexed.add(n.path);
   let files = 0;
-  for (const p of new Set(paths)) {
-    const c = sizes.get(p);
-    if (c === undefined) continue;
-    baselineChars += c;
-    files++;
-  }
-  return files > 0 ? { files, baselineChars } : undefined;
+  for (const p of new Set(paths)) if (indexed.has(p)) files++;
+  return files > 0 ? { files } : undefined;
 }
 
-/** Appended to every retrieval footer so the agent reports the turn's running
- * total even when SKILL.md isn't loaded — the instruction rides along in the
- * tool output itself. Deliberately free of the `[graft] tokens saved ≈ <n>`
- * pattern so the PostToolUse accumulator that parses these footers never
- * mistakes the nudge (or its example) for a second number to count. */
-export const SAVINGS_TURN_NUDGE =
-  ' At the end of your reply, tell the user the total graft tokens saved this ' +
-  'turn — sum each such line across your graft calls — e.g. "🌱 graft saved ~N tokens this turn".';
-
-/** The one-line savings estimate for a command's text output, so the agent gets
- * the number for free — no extra tool call. `body` is the exact rendered output
- * the agent reads (the pack). Returns "" when there's nothing honest to claim:
- * no baseline, or the output isn't actually smaller than reading the files
- * (tiny files, where the pointers cost more than the source). */
-export function savingsLine(body: string, saved: Savings | undefined): string {
-  if (!saved || saved.baselineChars <= 0) return '';
-  const pack = toTokens(body.length);
-  const base = toTokens(saved.baselineChars);
-  if (base <= pack) return '';
-  const delta = base - pack;
-  const pct = Math.round((delta / base) * 100);
-  return (
-    `[graft] tokens saved ≈ ${delta.toLocaleString()} (${pct}%) — this output ≈ ` +
-    `${pack.toLocaleString()} tok vs reading the ${saved.files} file(s) it covers whole ≈ ` +
-    `${base.toLocaleString()} tok (estimate).` +
-    SAVINGS_TURN_NUDGE
-  );
+/** The one-line marker for a command's text output: graft answered, and over
+ * how many files. Never a savings claim — see this module's header. */
+export function graftLine(cov: Coverage | undefined): string {
+  if (!cov || cov.files <= 0) return GRAFT_MARKER;
+  return `${GRAFT_MARKER} · ${cov.files.toLocaleString()} file(s) covered`;
 }
 
-/** Render `body` with the savings line on TOP.
+/** Render `body` with the marker on TOP.
  *
  * Deliberately a header, not a footer: agents routinely pipe graft through
  * `head -N` (and hosts truncate long tool output from the end), which silently
- * ate the number and, with it, the PostToolUse accumulator that feeds the
- * statusline's `~N tok saved`. Every clipper keeps the head, so the number
- * survives. Emitted once — a second copy at the bottom would be double-counted
- * by that accumulator's `matchAll`. */
-export function withSavings(body: string, saved: Savings | undefined): string {
-  const line = savingsLine(body, saved);
-  return line ? `${line}\n\n${body}` : body;
+ * ate the line and, with it, the PostToolUse counter behind the statusline.
+ * Every clipper keeps the head. Emitted once — a second copy would be
+ * double-counted by that counter's `matchAll`. */
+export function withGraftLine(body: string, cov: Coverage | undefined): string {
+  return `${graftLine(cov)}\n\n${body}`;
 }

@@ -26,8 +26,10 @@ export interface SessionState {
   lastQuery: string | null;
   perAgentQuery: Record<string, string>;
   graftReads: number; sourceReads: number;
-  /** Cumulative tokens saved this session via `ask --source` retrieval (est.). */
-  savedTokens: number;
+  /** Graft retrieval calls this session (CLI + MCP). Replaced a summed
+   * tokens-saved estimate whose baseline — every covered file read in full —
+   * nobody would actually have paid; a call count is a fact. */
+  graftCalls: number;
   /** Pointers the prompt hook already injected this session (novelty gate:
    * a hit whose pointer was shown once is never re-injected). Optional so
    * session files written before this field still parse. */
@@ -38,7 +40,7 @@ export interface SessionState {
 }
 
 function emptySession(): SessionState {
-  return { lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, savedTokens: 0, injectedPointers: [], nudges: 0 };
+  return { lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, graftCalls: 0, injectedPointers: [], nudges: 0 };
 }
 
 function sessionPath(d: string, id: string): string { return join(cacheDir(d), 'session', `${id}.json`); }

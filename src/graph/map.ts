@@ -22,7 +22,7 @@ import type { GraphV1, NodeV1 } from "./types.js";
 import { languageLabelOf } from "./extract.js";
 import { WALK_RELATIONS } from "./relations.js";
 import { scopeLabel, scopeOf, scopesOfGraph } from "./scopes.js";
-import { withSavings, savingsFor, type Savings } from "../context/savings.js";
+import { withGraftLine, coverageFor, type Coverage } from "../context/savings.js";
 
 export interface Hub {
   name: string;
@@ -77,7 +77,7 @@ export interface RepoMap {
   dropped: number;
   /** Tokens-saved baseline: every indexed file read whole — the cost of
    * orienting by reading the repo instead of this map. */
-  saved?: Savings;
+  saved?: Coverage;
 }
 
 export interface BuildRepoMapOptions {
@@ -280,7 +280,7 @@ export function buildRepoMap(graph: GraphV1, opts: BuildRepoMapOptions = {}): Re
     scopes: scopeGroups,
     hotspots,
     dropped,
-    saved: savingsFor(graph, fileNodes.map((f) => f.path)),
+    saved: coverageFor(graph, fileNodes.map((f) => f.path)),
   };
 }
 
@@ -346,5 +346,5 @@ export function formatRepoMap(map: RepoMap): string {
   lines.push(`hotspots: ${map.hotspots.map(formatHotspot).join("  ")}`);
 
   const body = lines.join("\n");
-  return withSavings(body, map.saved) + "\n";
+  return withGraftLine(body, map.saved) + "\n";
 }

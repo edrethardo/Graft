@@ -13,7 +13,7 @@
  */
 import { resolve } from "node:path";
 import { contextDirFor } from "../context/node-file.js";
-import { withSavings, savingsFor, type Savings } from "../context/savings.js";
+import { withGraftLine, coverageFor, type Coverage } from "../context/savings.js";
 import { unindexedNote, type UnindexedStat } from "./coverage.js";
 import { edgeCoverageOf, languageOf } from "./extract.js";
 import { loadGraphCached } from "./load.js";
@@ -57,13 +57,13 @@ export function hitLine(direction: Direction, hit: EdgeHit, showDepth: boolean):
 export function callersSavings(
   graph: GraphV1,
   results: { symbol: NodeV1; hits: EdgeHit[] }[],
-): Savings | undefined {
+): Coverage | undefined {
   const paths: string[] = [];
   for (const { symbol, hits } of results) {
     paths.push(symbol.path);
     for (const h of hits) if (h.node) paths.push(h.node.path);
   }
-  return savingsFor(graph, paths);
+  return coverageFor(graph, paths);
 }
 
 /** Loud, actionable empty-result note — never a bare empty list. `candidateCount`
@@ -240,5 +240,5 @@ export function runCallersCommand(query: string, dir: string, opts: CallersCliOp
     lines.push("");
   }
   const body = lines.join("\n").replace(/\n+$/, "\n");
-  process.stdout.write(withSavings(body, saved));
+  process.stdout.write(withGraftLine(body, saved));
 }

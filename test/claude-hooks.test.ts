@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { underGraft, main, lastFileScopeHint, promptAskTimeout } from '../src/claude/hooks.js';
 import { readStats, readSession } from '../src/claude/state.js';
 import { runSync } from '../src/claude/sync-run.js';
-import { savingsLine } from '../src/context/savings.js';
+import { graftLine } from '../src/context/savings.js';
 import { writeStats, emptyStats, acquireLock } from '../src/claude/state.js';
 
 test('underGraft detects edits inside graft/', () => {
@@ -371,27 +371,27 @@ test('tool-savings sums the [graft] footer into the session total, keyed by sess
     const stdin = JSON.stringify({
       session_id: 's1',
       tool_name: 'Bash',
-      tool_response: { stdout: 'skeleton …\n\n[graft] tokens saved ≈ 2,181 (89%) — this output ≈ 258 tok …' },
+      tool_response: { stdout: 'skeleton …\n\n[graft] answered from the index · 3 file(s) covered' },
     });
     await runWithStdin(stdin, () => main('tool-savings'));
-    assert.equal(readSession(d, 's1').savedTokens, 2181);
+    assert.equal(readSession(d, 's1').graftCalls, 1);
 
     // A second graft call in the same session accumulates.
     const again = JSON.stringify({
       session_id: 's1',
-      tool_response: { stdout: '[graft] tokens saved ≈ 7,510 (99%) — this output ≈ 57 tok …' },
+      tool_response: { stdout: '[graft] answered from the index · 12 file(s) covered' },
     });
     await runWithStdin(again, () => main('tool-savings'));
-    assert.equal(readSession(d, 's1').savedTokens, 2181 + 7510);
+    assert.equal(readSession(d, 's1').graftCalls, 2);
 
     // A different session keeps its own tally.
-    assert.equal(readSession(d, 's2').savedTokens, 0);
+    assert.equal(readSession(d, 's2').graftCalls, 0);
   } finally {
     delete process.env.CLAUDE_PROJECT_DIR;
   }
 });
 
-test('tool-savings sums every footer when one payload carries several', async () => {
+test('tool-savings counts every marker when one payload carries several', async () => {
   const d = mkdtempSync(join(tmpdir(), 'graft-savings-'));
   process.env.CLAUDE_PROJECT_DIR = d;
   try {
@@ -399,12 +399,12 @@ test('tool-savings sums every footer when one payload carries several', async ()
       session_id: 'multi',
       tool_response: {
         stdout:
-          'graft callers …\n[graft] tokens saved ≈ 100 (90%) — …\n' +
-          'graft map …\n[graft] tokens saved ≈ 1,000 (99%) — …',
+          'graft callers …\n[graft] answered from the index · 2 file(s) covered\n' +
+          'graft map …\n[graft] answered from the index · 9 file(s) covered',
       },
     });
     await runWithStdin(stdin, () => main('tool-savings'));
-    assert.equal(readSession(d, 'multi').savedTokens, 1100);
+    assert.equal(readSession(d, 'multi').graftCalls, 2);
   } finally {
     delete process.env.CLAUDE_PROJECT_DIR;
   }
@@ -426,16 +426,16 @@ test('tool-savings is a no-op (no session file) when the tool output has no graf
   }
 });
 
-test('tool-savings counts a REAL savings line (with the turn nudge) exactly once', async () => {
+test('tool-savings counts a REAL rendered marker exactly once', async () => {
   const d = mkdtempSync(join(tmpdir(), 'graft-savings-real-'));
   process.env.CLAUDE_PROJECT_DIR = d;
   try {
-    // body ≈ 10 tok, baseline ≈ 2000 tok → footer claims ≈ 1990 saved. The nudge
-    // (with its "🌱 graft saved ~N tokens" example) must NOT be double-counted.
-    const footer = savingsLine('x'.repeat(40), { files: 2, baselineChars: 8000 });
-    const stdin = JSON.stringify({ session_id: 'real', tool_response: { stdout: `callers …${footer}` } });
+    // The line the renderer actually emits — one call must count as one, no
+    // matter what the body says.
+    const line = graftLine({ files: 2 });
+    const stdin = JSON.stringify({ session_id: 'real', tool_response: { stdout: `callers …${line}` } });
     await runWithStdin(stdin, () => main('tool-savings'));
-    assert.equal(readSession(d, 'real').savedTokens, 1990);
+    assert.equal(readSession(d, 'real').graftCalls, 1);
   } finally {
     delete process.env.CLAUDE_PROJECT_DIR;
   }

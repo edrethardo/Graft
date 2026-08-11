@@ -17,7 +17,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import matter from "gray-matter";
 import { contextDirFor } from "../context/node-file.js";
-import { withSavings, savingsFor, SAVINGS_TURN_NUDGE, type Savings } from "../context/savings.js";
+import { withGraftLine, coverageFor, graftLine, type Coverage } from "../context/savings.js";
 import { unsupportedFileNote } from "../graph/coverage.js";
 import { loadGraphCached, loadAskIndexCached } from "../graph/load.js";
 import {
@@ -69,7 +69,7 @@ export interface AskResult {
   /** Token-saving estimate, set only in `--source` (retriever) mode: the whole
    * size of the distinct files these hits point into, i.e. the baseline cost of
    * reading them instead of this pack. Computed from file sizes stored at build. */
-  saved?: { files: number; baselineChars: number };
+  saved?: { files: number };
   /** Lexical mode only: share (0..1) of the query's distinct terms the TOP hit
    * matched. A relevance signal for callers that inject packs unprompted (the
    * Claude prompt hook): a low share means the query's words barely overlap the
@@ -805,7 +805,7 @@ function hitFiles(hits: AskHit[]): Set<string> {
  * (a pre-upgrade index) — the caller then just omits the estimate. */
 function baselineFor(hits: AskHit[], graph: GraphV1 | null): AskResult["saved"] | undefined {
   if (!graph) return undefined;
-  return savingsFor(graph, hitFiles(hits));
+  return coverageFor(graph, hitFiles(hits));
 }
 
 /** Answer a query from the graft/ graph at `dir`. Deterministic, $0. */
@@ -867,7 +867,7 @@ export interface SkeletonResult {
   entries: SkeletonEntry[];
   note?: string;
   /** Tokens-saved baseline: this file read whole vs the signatures-only view. */
-  saved?: Savings;
+  saved?: Coverage;
 }
 
 /** Signatures-only view of one file, straight from the wiring graph — the
@@ -906,7 +906,7 @@ export function skeleton(dir: string, file: string, opts: { contextDir?: string 
       signature: n.signature,
       summary: n.summary?.split("\n")[0].trim() || undefined,
     })),
-    saved: savingsFor(graph, [defs[0].path]),
+    saved: coverageFor(graph, [defs[0].path]),
   };
 }
 
@@ -920,7 +920,7 @@ export function formatSkeleton(r: SkeletonResult): string {
     return `- ${e.span}  ${e.kind} ${e.name}${sig}${sum}`;
   });
   const body = `${head}\n${lines.join("\n")}`;
-  return withSavings(body, r.saved) + "\n";
+  return withGraftLine(body, r.saved) + "\n";
 }
 
 /** Rough tokens for a byte length (≈ 4 chars/token; good enough for an estimate). */
@@ -970,8 +970,7 @@ export function formatAsk(r: AskResult): string {
     lines.push(...scopeFooterLines(r));
   }
   const body = lines.join("\n").trimEnd();
-  const savings = askSavingsLine(r, body);
-  return (savings ? `${savings}\n\n${body}` : body) + escalationNudge(r) + "\n";
+  return `${askGraftLine(r)}\n\n${body}` + escalationNudge(r) + "\n";
 }
 
 /** When a lexical `ask` returns thin/no results, the productive next move is a
@@ -988,24 +987,12 @@ function escalationNudge(r: AskResult): string {
   );
 }
 
-/** The one-line token-saving estimate `ask` prepends in retriever mode, so the
- * agent gets the number for free in the tool output — no extra work on its end.
- * `packChars` is measured from the rendered body: exactly what the agent reads.
- * Header, not footer, for the reason documented on `withSavings`: a trailing
- * line dies to `head -N` and to host output truncation. */
-function askSavingsLine(r: AskResult, body: string): string {
-  if (!r.saved || r.saved.baselineChars <= 0) return "";
-  const pack = toTokens(body.length);
-  const base = toTokens(r.saved.baselineChars);
-  if (base <= pack) return ""; // no saving to claim (tiny files); stay quiet
-  const saved = base - pack;
-  const pct = Math.round((saved / base) * 100);
-  return (
-    `[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%) — this pack ≈ ` +
-    `${pack.toLocaleString()} tok vs reading the ${r.saved.files} source file(s) whole ≈ ` +
-    `${base.toLocaleString()} tok. Estimate (baseline = those files read in full).` +
-    SAVINGS_TURN_NUDGE
-  );
+/** The one-line marker `ask` prepends, so the reader can see the answer came
+ * from the index and over how many files. Header, not footer, for the reason
+ * documented on `withGraftLine`: a trailing line dies to `head -N` and to host
+ * output truncation. No savings estimate — see `context/savings.ts`. */
+function askGraftLine(r: AskResult): string {
+  return graftLine(r.saved);
 }
 
 /** Multi-scope footer: answers a reviewer's two questions — "which

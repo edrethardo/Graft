@@ -179,21 +179,22 @@ export function lastFileScopeHint(dir: string, lastFile: string | null | undefin
   }
 }
 
-/** PostToolUse on a graft retrieval tool. Its rendered output carries one (or
- * more) `[graft] tokens saved ≈ N` footers — the same numbers the agent just
- * read. Sum them and add to the session's running total so the statusline's
- * `~N tok saved` reflects what graft saved this session, across CLI and MCP.
- * Pure parse of the payload the hook already received (no re-run), and a no-op
- * unless a footer is present — so it stays cheap on unrelated Bash calls. */
+/** PostToolUse on a graft retrieval tool. Its rendered output opens with the
+ * `[graft] answered from the index` marker; count those to keep the session's
+ * graft-call tally, which the statusline shows as `N graft calls`, across CLI
+ * and MCP. This used to sum the tokens-saved numbers the output carried, but
+ * that estimate assumed you would otherwise have read every covered file in
+ * full — an order of magnitude high — so the statusline reported a total that
+ * was never real. A call count is a fact. Pure parse of the payload the hook
+ * already received (no re-run), and a no-op unless the marker is present, so
+ * it stays cheap on unrelated Bash calls. */
 function handleToolSavings(input: any, dir: string): void {
   const blob = JSON.stringify(input?.tool_response ?? input ?? '');
-  let total = 0;
-  for (const m of blob.matchAll(/\[graft\] tokens saved ≈ ([\d,]+)/g))
-    total += Number(m[1].replace(/,/g, '')) || 0;
-  if (total <= 0) return;
+  const calls = [...blob.matchAll(/\[graft\] answered from the index/g)].length;
+  if (calls <= 0) return;
   const id = input?.session_id || 'default';
   const s = readSession(dir, id);
-  s.savedTokens = (s.savedTokens ?? 0) + total;
+  s.graftCalls = (s.graftCalls ?? 0) + calls;
   writeSession(dir, id, s);
 }
 

@@ -341,7 +341,9 @@ test("formatAsk: the structural fallthrough note prints prominently, before any 
     await buildGraph(dir);
     const r = ask(dir, "who calls unusedHelper");
     const out = formatAsk(r);
-    assert.ok(out.startsWith("graft ask —"), "header is the first line");
+    // Marker first (it must survive `head -N`), then the report header.
+    assert.ok(out.startsWith("[graft] answered from the index"), "marker is the first line");
+    assert.match(out, /^\[graft\][^\n]*\n\ngraft ask —/, "report header follows the marker");
     const noteIdx = out.indexOf("⚠ structural index: no entries");
     assert.ok(noteIdx > 0, "the note is rendered");
     const firstHitIdx = out.search(/\n1\.\s/); // lexical hit numbering starts at "1. "

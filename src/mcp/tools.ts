@@ -11,7 +11,7 @@ import { ensureFreshChildren, ensureFreshGraph, refreshNote } from '../graph/ref
 import { contextDirFor } from '../context/node-file.js';
 import { resolveSymbol, edgeWalk, type Direction, type EdgeHit } from '../graph/traverse.js';
 import { callersSavings, headerOf, hitLine, looseNoteFor, symbolEdgeless, unknownSymbolNote } from '../graph/traverse-cli.js';
-import { withSavings } from '../context/savings.js';
+import { withGraftLine } from '../context/savings.js';
 import { grepGraph } from '../search/grep.js';
 import { formatGrepResult, zeroHitNote } from '../search/grep-cli.js';
 import { buildRepoMap, formatRepoMap } from '../graph/map.js';
@@ -305,7 +305,7 @@ async function callSingleTool(
         const results = matches.map((m) => ({ symbol: m, hits: edgeWalk(w, m, direction, depth) }));
         const byId = new Map(results.map((r) => [r.symbol.id, r.hits]));
         const body = renderMatches(direction, depth > 1, matches, (m) => byId.get(m.id) ?? []);
-        const text = withSavings(body, callersSavings(w, results));
+        const text = withGraftLine(body, callersSavings(w, results));
         return { text, isError: false };
       }
       case 'graft_find_all': {

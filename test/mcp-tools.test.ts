@@ -247,7 +247,7 @@ test('graft_repo_map round-trips a repo orientation on the built fixture', async
   const d = builtRepo();
   const r = await callTool(d, 'graft_repo_map', {});
   assert.equal(r.isError, false);
-  assert.match(r.text, /^repo map — \d+ files · \d+ symbols · \d+ edges/);
+  assert.match(r.text, /^\[graft\] answered from the index[^\n]*\n\nrepo map — \d+ files · \d+ symbols · \d+ edges/);
   assert.match(r.text, /src/);
   assert.match(r.text, /hotspots:/);
 });

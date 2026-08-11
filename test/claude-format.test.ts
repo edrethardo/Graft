@@ -73,11 +73,12 @@ test('formatRetrieval keeps the substitutive header when code is inlined', () =>
 });
 
 test('formatRetrieval appends a tokens-saved line when ask reports a baseline', () => {
-  const ask = { query: 'pkce', mode: 'lexical', saved: { files: 1, baselineChars: 8000 }, hits: [
+  const ask = { query: 'pkce', mode: 'lexical', saved: { files: 1 }, hits: [
     { kind: 'symbol', title: 'verify', pointer: 'src/pkce.ts:L1-L4', snippet: 's', score: 1, code: 'a\nb' },
   ] } as any;
   const txt = strip(formatRetrieval(ask)!);
-  assert.match(txt, /tokens saved ≈ [\d,]+ \(\d+%\)/);
+  assert.match(txt, /\[graft\] answered from the index/);
+  assert.doesNotMatch(txt, /tokens saved|\d+%/);
 });
 
 test('formatRetrieval returns null for no hits', () => {
@@ -93,7 +94,7 @@ const gateAsk = (over: Record<string, unknown> = {}) => ({
   ],
   ...over,
 }) as any;
-const freshSession = () => ({ lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, savedTokens: 0, injectedPointers: [] as string[] });
+const freshSession = () => ({ lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, graftCalls: 0, injectedPointers: [] as string[] });
 
 test('relevantRetrieval injects on good coverage and records pointers', () => {
   const s = freshSession();

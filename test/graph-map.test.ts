@@ -442,7 +442,7 @@ test("formatRepoMap: stays under the 6000-char budget and surfaces hub names", (
   const text = formatRepoMap(map);
 
   assert.ok(text.length <= 6000, `formatted map is ${text.length} chars, expected <= 6000`);
-  assert.match(text, /^repo map — \d+ files · \d+ symbols · \d+ edges/);
+  assert.match(text, /^\[graft\] answered from the index[^\n]*\n\nrepo map — \d+ files · \d+ symbols · \d+ edges/);
   for (const d of map.dirs) {
     for (const h of d.hubs) {
       assert.ok(text.includes(h.name), `hub name "${h.name}" must appear in the rendered map`);

@@ -20,10 +20,11 @@ function graftBlocks(): Record<string, Json[]> {
   return {
     PostToolUse: [
       { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: hookCmd('post-edit'), timeout: 10000 }] },
-      // A retrieval tool (CLI `graft …` via Bash, or the `graft_*` MCP tools) prints a
-      // `[graft] tokens saved ≈ N` footer; this hook sums it into the session total the
-      // statusline shows. Broad matcher, but the handler no-ops instantly unless a footer
-      // is actually present, so non-graft Bash calls cost only a stdin read.
+      // A retrieval tool (CLI `graft …` via Bash, or the `graft_*` MCP tools) opens its
+      // output with the `[graft] answered from the index` marker; this hook counts those
+      // into the session's call tally the statusline shows. Broad matcher, but the handler
+      // no-ops instantly unless the marker is present, so non-graft Bash calls cost only a
+      // stdin read.
       { matcher: 'Bash|mcp__graft__', hooks: [{ type: 'command', command: hookCmd('tool-savings'), timeout: 8000 }] },
     ],
     // Longer budget than the other hooks: its `graft ask` is a real query, and a
