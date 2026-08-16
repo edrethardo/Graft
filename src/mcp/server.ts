@@ -66,10 +66,7 @@ export function startMcpServer(root: string, dirOverride?: string, version = '0'
             const base = mcpInstructions(
               loadGraphCached(contextDirFor(resolve(root), dirOverride))?.meta.unindexed,
             );
-            return upkeep.length ? `${upkeep.join('
-')}
-
-${base}` : base;
+            return upkeep.length ? [...upkeep, '', base].join('\n') : base;
           })(),
         });
         return;

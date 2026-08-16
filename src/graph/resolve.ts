@@ -137,7 +137,7 @@ export function resolveEdges(
   const cppIncludes = new Map<string, string[]>();
   for (const e of rawEdges) {
     if (e.relation !== "imports" || !e.specifier || !cpp(e.file)) continue;
-    const target = resolveCppInclude(e.specifier, e.file, fileIds, byId);
+    const target = resolveCInclude(e.specifier, e.file, byId, cFilesBySuffix);
     if (byId.has(target)) push(cppIncludes, e.file, target);
   }
   const stemImpls = new Map<string, string[]>();
@@ -184,9 +184,6 @@ export function resolveEdges(
                 : e.file.endsWith(".php")
                   ? resolvePhpUse(e.specifier, phpFilesBySuffix)
                   : resolveImport(e.specifier, e.file, byId);
-          : cpp(e.file)
-            ? resolveCppInclude(e.specifier, e.file, fileIds, byId)
-            : resolveImport(e.specifier, e.file, byId);
       add(e.source, target, "imports", "extracted");
     } else if (e.relation === "extends" || e.relation === "implements") {
       const kinds: Kind[] = e.relation === "implements" ? ["interface"] : ["class", "interface"];
@@ -217,7 +214,19 @@ export function resolveEdges(
         if (!e.recvType) continue;
         const hit = resolveTypedMember(e.recvType, e.name!, e.file, ownerMethod, classParents, e.argCount);
         if (hit === "ambiguous") continue; // drop — never guess past an ambiguous owner
-        if (hit) add(e.source, hit.id, "calls", hit.confidence);
+        if (hit) {
+          add(e.source, hit.id, "calls", hit.confidence);
+          continue;
+        }
+        // A C++ qualifier may name a NAMESPACE (`game::spawn(1)`), which owns no
+        // methods, so the owner index cannot match it. Resolve against function
+        // nodes whose ns path ends in the qualifier; ambiguity still drops (#68).
+        if (cpp(e.file)) {
+          const inNs = (globalName.get(e.name!) ?? []).filter(
+            (n) => n.kind === "function" && n.ns && (n.ns === e.recvType || n.ns.endsWith(`.${e.recvType}`)),
+          );
+          if (inNs.length === 1) add(e.source, inNs[0].id, "calls", "inferred");
+        }
         // No owner-qualified match means the call is unresolved. A unique bare
         // method name is not evidence that this receiver has that method — a
         // name-fallback here was measured to HALVE call-edge precision (73%→37%
@@ -242,32 +251,12 @@ export function resolveEdges(
             ? ["class", "struct", "enum", "interface"]
             : ["function"];
       const hit = resolveName(e.name!, e.file, callKinds, perFileName, globalName);
-      if (hit) add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
-        if (hit) {
-          add(e.source, hit.id, "calls", hit.confidence);
-          continue;
-        }
-        // C++ qualified calls arrive as member calls with the qualifier as
-        // recvType — but the qualifier may be a NAMESPACE (`game::spawn(1)`),
-        // which owns no methods. Resolve against function nodes whose ns path
-        // ends in the qualifier; ambiguity still drops (issue #68 step 3).
-        if (cpp(e.file)) {
-          const inNs = (globalName.get(e.name!) ?? []).filter(
-            (n) => n.kind === "function" && n.ns && (n.ns === e.recvType || n.ns.endsWith(`.${e.recvType}`)),
-          );
-          if (inNs.length === 1) add(e.source, inNs[0].id, "calls", "inferred");
-        }
-        // Otherwise unresolved. A unique bare method name is not evidence
-        // that this receiver has that method.
-        continue;
-      }
-      const hit = resolveName(e.name!, e.file, ["function"], perFileName, globalName);
       if (hit) {
         add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
       } else if (cpp(e.file)) {
         // Repo-wide ambiguity the uniqueness gate must refuse can still be
-        // honest with more context: exactly one candidate visible in the
-        // calling file's include closure, or — failing that — exactly one in
+        // resolved honestly with more context: exactly one candidate visible in
+        // the calling file's include closure, or — failing that — exactly one in
         // the caller's own namespace (an unqualified call inside `namespace
         // game` reaches game::helper without any include). Ambiguity at every
         // level still drops — never guess.
@@ -291,26 +280,6 @@ export function resolveEdges(
   return out;
 }
 
-/**
- * Resolve a quoted #include path to a repo file node: same-dir relative first
- * (the compiler's own quote-form rule), then a unique path-suffix match —
- * headers are found through -I roots, so the literal spec is a suffix of the
- * repo-relative path. No match, or an ambiguous suffix → keep the raw spec
- * (external or unresolvable), exactly like the other languages' resolvers.
- */
-function resolveCppInclude(
-  spec: string,
-  file: string,
-  fileIds: string[],
-  byId: Map<string, NodeV1>,
-): string {
-  const dir = posix.dirname(toPosixPath(file));
-  const rel = posix.normalize(posix.join(dir, spec));
-  if (byId.has(rel)) return rel;
-  const suffix = `/${spec}`;
-  const hits = fileIds.filter((id) => id === spec || id.endsWith(suffix));
-  return hits.length === 1 ? hits[0] : spec;
-}
 
 function push<T>(map: Map<string, T[]>, key: string, val: T): void {
   const arr = map.get(key);

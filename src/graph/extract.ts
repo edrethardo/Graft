@@ -18,9 +18,7 @@ import { contentHash } from "../util/id.js";
 import { collectBindings, cppDeclaratorName, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "java";
-export type Language = "typescript" | "tsx" | "python" | "go" | "cpp";
-export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "bash";
+export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "cpp" | "bash";
 
 /**
  * How much edge data a language's extraction can honestly claim (issue #66/#68).
@@ -227,6 +225,8 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   python: PY_KINDS,
   go: GO_KINDS,
   java: JAVA_KINDS,
+  cpp: CPP_KINDS,
+  bash: BASH_KINDS,
 };
 
 /**
@@ -242,8 +242,8 @@ const CALL_TYPES: Record<Language, ReadonlySet<string>> = {
   python: new Set(["call"]),
   go: new Set(["call_expression"]),
   java: new Set(["method_invocation", "object_creation_expression"]),
-  cpp: CPP_KINDS,
-  bash: BASH_KINDS,
+  cpp: new Set(["call_expression"]),
+  bash: new Set(["command"]),
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -402,11 +402,9 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
             ? goExported(desc.name)
             : ctx.lang === "java"
               ? javaExported(node)
-            : ctx.lang === "cpp"
-              ? true // no module system at Tier-1; linkage analysis is out of scope
-            : ctx.lang === "cpp" || ctx.lang === "bash"
-              ? true // no module/visibility system at Tier-1
-              : tsExported(node),
+              : ctx.lang === "cpp" || ctx.lang === "bash"
+                ? true // no module/visibility system at Tier-1
+                : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -427,20 +425,13 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     if (desc.kind === "class" || javaTypeDecl || (ctx.lang === "cpp" && desc.kind === "struct"))
       edges.push(...heritageEdges(node, id, ctx));
 
+    // A C++ struct is a class with default-public members, so its inline methods
+    // need an owner just like a class's (Go structs never contain definitions, so
+    // this is a no-op there). `desc.owner` — only ever set for C++ out-of-class
+    // definitions — makes `this->x()` inside `void Physics::step() { … }` resolve
+    // against Physics, whose name lives in the declarator, not in any ancestor.
     const enclosingClass =
-      desc.kind === "class" || javaTypeDecl
-        ? desc.name
-        : isGoMethod
-          ? goReceiverType(node)
-          : ctx.enclosingClass;
-    // structs count: a C++ struct is a class with default-public members, and its
-    // inline methods need an owner just like a class's. (Go structs never contain
-    // definitions, so including "struct" here is a no-op for them.) `desc.owner`
-    // (only ever set for C++ out-of-class definitions) makes `this->x()` inside
-    // `void Physics::step() { ... }` resolve against Physics — the receiver class
-    // is named in the declarator, not in any enclosing node.
-    const enclosingClass =
-      desc.kind === "class" || desc.kind === "struct"
+      desc.kind === "class" || javaTypeDecl || (ctx.lang === "cpp" && desc.kind === "struct")
         ? desc.name
         : isGoMethod
           ? goReceiverType(node)
@@ -473,8 +464,6 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
   // not a definition — capture calls/imports/references, then descend with the same context
   const callTypes = CALL_TYPES[ctx.lang];
   if (callTypes.has(node.type)) {
-  const callType = ctx.lang === "python" ? "call" : ctx.lang === "bash" ? "command" : "call_expression";
-  if (node.type === callType) {
     const callee = calleeName(node, ctx.lang);
     if (callee) {
       const callEdge: RawEdge = {
@@ -735,6 +724,8 @@ function javaExported(node: Parser.SyntaxNode): boolean {
   const mods = node.namedChildren.find((c) => c.type === "modifiers");
   if (!mods) return false;
   return mods.children.some((c) => c.type === "public" || c.type === "protected");
+}
+
 /** C/C++ definition shapes (issue #66, definitions-only): function definitions
  * (free, inline-in-class, and out-of-class `Type::method`), plus named
  * class/struct/enum bodies. Declarations without a body — prototypes, forward
@@ -1038,6 +1029,7 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
       (c) => c.type === "scoped_identifier" || c.type === "identifier",
     );
     return id?.text ?? null;
+  }
   if (lang === "cpp") {
     // Quoted includes only — `<...>` names a system header by convention, which
     // can never be a repo file, and dangling edges to <cstdio> would be noise.

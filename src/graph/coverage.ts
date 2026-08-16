@@ -11,7 +11,7 @@
  * at query time.
  */
 import { CODE_EXTENSIONS } from "../context/build.js";
-import { languageOf } from "./extract.js";
+import { supportedExtensions } from "./source-files.js";
 
 /** One unparseable code extension and how many files carry it. */
 export interface UnindexedStat {
@@ -20,6 +20,18 @@ export interface UnindexedStat {
 }
 
 const CODE_EXT_SET = new Set(CODE_EXTENSIONS);
+
+/** Extensions SOME tier parses — depth (extract.ts) or breadth (generic.ts).
+ * Computed once: the registries are static. */
+const PARSED_EXT_SET = new Set(supportedExtensions());
+
+/** Does any tier claim this path? The honest-coverage reporting keys off this,
+ * not off the depth tier alone — otherwise every breadth-tier language would be
+ * reported as an unindexed gap. */
+function hasParser(path: string): boolean {
+  const dot = path.lastIndexOf(".");
+  return dot >= 0 && PARSED_EXT_SET.has(path.slice(dot).toLowerCase());
+}
 
 function codeExtOf(path: string): string | null {
   const dot = path.lastIndexOf(".");
@@ -37,7 +49,7 @@ function codeExtOf(path: string): string | null {
 export function unindexedCodeStats(files: string[]): UnindexedStat[] {
   const counts = new Map<string, number>();
   for (const f of files) {
-    if (languageOf(f) !== null) continue;
+    if (hasParser(f)) continue;
     const ext = codeExtOf(f);
     if (ext) counts.set(ext, (counts.get(ext) ?? 0) + 1);
   }
@@ -87,7 +99,7 @@ export function mergeUnindexed(lists: (UnindexedStat[] | undefined)[]): Unindexe
  * not "no definitions". Null for supported or non-code files.
  */
 export function unsupportedFileNote(path: string): string | null {
-  if (languageOf(path) !== null) return null;
+  if (hasParser(path)) return null;
   const ext = codeExtOf(path);
   if (!ext) return null;
   return `this file's language has no parser (${ext}) — the symbol graph does not cover it; read the file or use raw grep -rn`;

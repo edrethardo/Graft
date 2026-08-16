@@ -43,8 +43,9 @@ export interface GenericLang {
 export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "rust", exts: [".rs"], wasm: "rust" },
   { name: "java", exts: [".java"], wasm: "java" },
-  { name: "c", exts: [".c", ".h"], wasm: "c" },
-  { name: "cpp", exts: [".cpp", ".cc", ".cxx", ".hpp", ".hh"], wasm: "cpp" },
+  // NOTE: c / cpp are deliberately absent — this fork carries a hand-written
+  // DEPTH extractor for the C family (typed receivers, #include closure,
+  // namespace resolution), and the registry forbids overlapping extensions.
   { name: "ruby", exts: [".rb"], wasm: "ruby" },
   { name: "php", exts: [".php"], wasm: "php" },
   { name: "c_sharp", exts: [".cs"], wasm: "c_sharp" },
