@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { extractFile } from "../src/graph/extract.js";
 import { warmGenericGrammars, extractGeneric, genericLangOf, isWarm } from "../src/graph/generic.js";
 import { resolveEdges } from "../src/graph/resolve.js";
 import { buildGraph } from "../src/graph/build.js";
@@ -94,11 +95,10 @@ const SNIPPETS: Array<{ lang: string; file: string; src: string; defs: string[];
     src: `class A {\n  int Run() { return Helper(); }\n  int Helper() { return 1; }\n}\n`,
     defs: ["class:A", "method:Helper", "method:Run"], call: ["Run", "Helper"],
   },
-  {
-    lang: "c", file: "a.c",
-    src: `int helper() { return 1; }\nint run() { return helper(); }\n`,
-    defs: ["function:helper", "function:run"], call: ["run", "helper"],
-  },
+  // NOTE: no `c` row — this fork routes the C family through the DEPTH tier
+  // (extract.ts), so `.c` never reaches extractGeneric. The include-resolution
+  // guarantee that used to be proven here is proven against the depth
+  // extractor below.
 ];
 
 for (const s of SNIPPETS) {
@@ -149,8 +149,7 @@ test("breadth tier: Java extends/implements/new become resolved references edges
 // preprocessor). A local `#include "x.h"` becomes a file→file import the resolver
 // settles to an in-repo header — relative first, then a unique path-suffix (an
 // -I-reached header), and never a guess. System `<...>` includes are skipped.
-test("breadth tier: C #include becomes a resolved file→file import (local only, drop-rather-than-guess)", async () => {
-  await warmGenericGrammars(["c"]);
+test("depth tier: C #include becomes a resolved file→file import (local only, drop-rather-than-guess)", async () => {
   const files: Record<string, string> = {
     "src/app.c": '#include "app.h"\n#include "net/sock.h"\n#include <stdio.h>\nint run(void){return 0;}\n',
     "src/app.h": "int run(void);\n",
@@ -163,7 +162,7 @@ test("breadth tier: C #include becomes a resolved file→file import (local only
   };
   const nodes = [], raw = [];
   for (const [rel, src] of Object.entries(files)) {
-    const r = extractGeneric(rel, src, "c");
+    const r = extractFile(rel, src, "cpp");
     nodes.push(...r.nodes); raw.push(...r.rawEdges);
   }
   const imports = resolveEdges(nodes, raw).filter((e) => e.relation === "imports");

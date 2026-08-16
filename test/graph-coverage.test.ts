@@ -26,8 +26,8 @@ import type { GrepResult } from "../src/search/grep.js";
 function makeFixture(): string {
   const dir = mkdtempSync(join(tmpdir(), "graft-coverage-"));
   writeFileSync(join(dir, "a.ts"), "export function hello(): number { return 1; }\n");
-  writeFileSync(join(dir, "engine.rs"), "pub fn snap_entity_to_floor() {}\n");
-  writeFileSync(join(dir, "enemy_ai.rs"), "pub fn think() {}\n");
+  writeFileSync(join(dir, "schema.sql"), "SELECT snap_entity_to_floor();\n");
+  writeFileSync(join(dir, "report.sql"), "SELECT think();\n");
   writeFileSync(join(dir, "README.md"), "# not code\n");
   writeFileSync(join(dir, "notes.txt"), "not code either\n");
   return dir;
@@ -37,12 +37,12 @@ test("build reports code files no parser covers, and records them in the graph",
   const dir = makeFixture();
   const result = await buildGraph(dir);
 
-  // .rs is code the concept pass would read, but no Tier-1 grammar parses it;
+  // .sql is code the concept pass reads, but neither tier parses it;
   // .md/.txt are not code and must NOT be counted as skipped.
-  assert.deepEqual(result.skipped, [{ ext: ".rs", files: 2 }]);
+  assert.deepEqual(result.skipped, [{ ext: ".sql", files: 2 }]);
 
   const graph = readGraph(wiringPath(join(dir, "graft")));
-  assert.deepEqual(graph?.meta.unindexed, [{ ext: ".rs", files: 2 }]);
+  assert.deepEqual(graph?.meta.unindexed, [{ ext: ".sql", files: 2 }]);
 });
 
 test("a fully supported repo skips nothing and records nothing", async () => {
@@ -106,12 +106,12 @@ test("mergeUnindexed sums per-extension counts across workspace children", () =>
     undefined,
     [
       { ext: ".cpp", files: 3 },
-      { ext: ".rs", files: 1 },
+      { ext: ".sql", files: 1 },
     ],
   ]);
   assert.deepEqual(merged, [
     { ext: ".cpp", files: 5 },
-    { ext: ".rs", files: 1 },
+    { ext: ".sql", files: 1 },
   ]);
 });
 
@@ -119,7 +119,7 @@ test("skeleton on an unsupported-language file says 'no parser', not 'no definit
   const dir = makeFixture();
   await buildGraph(dir);
 
-  const rs = skeleton(dir, "enemy_ai.rs");
+  const rs = skeleton(dir, "report.sql");
   assert.ok(rs.note?.includes("no parser"), rs.note);
   assert.equal(rs.entries.length, 0);
 
@@ -129,7 +129,7 @@ test("skeleton on an unsupported-language file says 'no parser', not 'no definit
 });
 
 test("unsupportedFileNote fires only for code-like extensions", () => {
-  assert.ok(unsupportedFileNote("src/game/enemy_ai.cpp".replace(".cpp", ".rs"))?.includes("no parser"));
+  assert.ok(unsupportedFileNote("src/game/enemy_ai.cpp".replace(".cpp", ".sql"))?.includes("no parser"));
   assert.equal(unsupportedFileNote("src/app.ts"), null); // has a parser
   assert.equal(unsupportedFileNote("README.md"), null); // not code
 });
